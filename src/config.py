@@ -47,3 +47,29 @@ def get_sector_config(sector_id: str) -> Dict[str, Any]:
     ]
     
     return sector
+
+# Parámetros del modelo matemático (Día 2)
+MODEL_CONFIG = {
+    # EPSG:32617 = UTM Zona 17 Norte (Aplica para Ibarra, Latitud positiva)
+    "crs_metric": "EPSG:32617",
+    
+    # Pesos de la fórmula (suma = 1.0)
+    "weights": {
+        "rainfall": 0.40,
+        "twi": 0.20,
+        "distance": 0.25,
+        "impervious": 0.15
+    },
+    
+    # Umbrales para normalizar de 0 a 1
+    "thresholds": {
+        # Si la lluvia supera este umbral, el factor de lluvia será 1.0 (máximo riesgo)
+        # Ajustado a 25.0mm para que el evento del 8 de abril de 2025 (25.6mm Open-Meteo) 
+        # marque un riesgo muy alto.
+        "max_rainfall_mm": 25.0,
+        # Si un punto está más lejos que esto de un cauce, el riesgo por distancia cae a 0.
+        "safe_distance_m": 500.0,
+        # Asumimos que un TWI muy alto (ej. > 15) es propensión máxima a acumular agua.
+        "max_twi": 15.0
+    }
+}

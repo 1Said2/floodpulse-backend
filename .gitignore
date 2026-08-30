@@ -11,6 +11,9 @@ __pycache__/
 # Caché de librerías (ej. OSMnx)
 cache/
 
+# Archivos temporales (ej. de Whitebox)
+tmp/
+
 # Archivos del sistema
 .DS_Store
 Thumbs.db
