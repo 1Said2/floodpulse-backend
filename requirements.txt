@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+geopandas
+shapely
+pyproj
+rasterio
+rioxarray
+xarray
+osmnx
+pystac-client
+planetary-computer
+requests
+whitebox
