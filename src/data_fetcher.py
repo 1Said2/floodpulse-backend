@@ -82,9 +82,13 @@ def fetch_land_cover(bbox: list) -> xr.DataArray:
     cropped = rds.rio.clip_box(minx=minx, miny=miny, maxx=maxx, maxy=maxy, crs="EPSG:4326")
     return cropped
 
-def fetch_osm_network(bbox: list) -> gpd.GeoDataFrame:
+from shapely.geometry import LineString
+
+def fetch_osm_network(bbox: list, fallback_coords: list = None) -> gpd.GeoDataFrame:
     """
     Descarga vías de drenaje (waterway) y cuerpos de agua desde OpenStreetMap usando osmnx.
+    Si la consulta retorna vacía (ej. colector embovedado) y se provee fallback_coords,
+    retorna un GeoDataFrame usando ese trazado manual.
     """
     minx, miny, maxx, maxy = bbox
     # En OSMnx 2.x, el orden es (left, bottom, right, top) es decir (minx, miny, maxx, maxy)
@@ -94,16 +98,22 @@ def fetch_osm_network(bbox: list) -> gpd.GeoDataFrame:
         "natural": ["water"]
     }
     
+    gdf = gpd.GeoDataFrame()
     try:
         # Importante: usar features_from_bbox (no graph)
         gdf = ox.features_from_bbox(bbox=(minx, miny, maxx, maxy), tags=tags)
-        
-        if gdf.empty:
-            print("ADVERTENCIA: La consulta a OSM retornó vacío. Posible causa: tramos embovedados o no mapeados.")
-        return gdf
     except ox._errors.InsufficientResponseError:
         print("ADVERTENCIA: No se encontraron elementos de agua en OSM para esta zona. (Puede ser canal embovedado/subterráneo).")
-        return gpd.GeoDataFrame()
     except Exception as e:
         print(f"ADVERTENCIA: Error consultando OSM: {e}")
-        return gpd.GeoDataFrame()
+        
+    if gdf.empty:
+        if fallback_coords:
+            print("ADVERTENCIA: La consulta a OSM retornó vacío. Utilizando geometría de respaldo (fallback)...")
+            line = LineString(fallback_coords)
+            # Crear un GDF mínimo con el LineString
+            gdf = gpd.GeoDataFrame({"waterway": ["fallback"]}, geometry=[line], crs="EPSG:4326")
+        else:
+            print("ADVERTENCIA: La consulta a OSM retornó vacío y no hay fallback disponible.")
+            
+    return gdf

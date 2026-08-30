@@ -16,6 +16,14 @@ SECTORS: Dict[str, Dict[str, Any]] = {
         # Tamaño del bounding box en grados (~1 km de lado) o un radio para buscar.
         # Para simplificar, definiremos un offset para el bounding box (aprox. 500m)
         "bbox_offset": 0.005, 
+        # Fallback manual para el colector embovedado (proxy Av. Mariano Acosta)
+        # Formato: Lista de [lon, lat] para construir un LineString si falla OSM
+        "fallback_waterway": [
+            [-78.1265, 0.3565], # Más arriba en la avenida
+            [-78.12463, 0.35502], # Redondel (centro)
+            [-78.1220, 0.3525], # Hacia el sur/este
+            [-78.1200, 0.3505]
+        ]
     }
 }
 
