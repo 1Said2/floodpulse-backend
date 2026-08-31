@@ -5,7 +5,7 @@ from fastapi import FastAPI, Query, HTTPException
 from pydantic import BaseModel
 
 from src.utils import get_utm_epsg
-from src.data_fetcher import fetch_rainfall, fetch_dem, fetch_land_cover, fetch_osm_network
+from src.data_fetcher import fetch_rainfall_forecast, fetch_rainfall_gpm, fetch_dem, fetch_land_cover, fetch_osm_network
 from src.risk_model import compute_flood_risk
 
 app = FastAPI(title="FloodPulse API", description="Motor de Riesgo de Inundación Hiperlocal")
@@ -23,7 +23,7 @@ def evaluate_risk(
     lat: float = Query(..., description="Latitud del punto central"),
     lon: float = Query(..., description="Longitud del punto central"),
     bbox_offset_deg: float = Query(0.005, description="Tamaño del offset para el bounding box (0.005 = ~500m)"),
-    rainfall_mm: Optional[float] = Query(None, description="Lluvia explícita en mm. Si se provee, no llama a Open-Meteo."),
+    rainfall_mm: Optional[float] = Query(None, description="Lluvia explícita en mm. Si se provee, no llama a Open-Meteo ni GPM."),
     event_start: Optional[str] = Query(None, description="Fecha inicio ISO8601 (ej. 2025-04-07)."),
     event_end: Optional[str] = Query(None, description="Fecha fin ISO8601 (ej. 2025-04-08)."),
     fallback_waterway_coords: Optional[str] = Query(None, description="JSON string con lista de coords [[lon,lat],...]")
@@ -32,21 +32,26 @@ def evaluate_risk(
     bbox = [lon - bbox_offset_deg, lat - bbox_offset_deg, lon + bbox_offset_deg, lat + bbox_offset_deg]
     crs_metric = get_utm_epsg(lat, lon)
     
-    # 2. Obtener Precipitación
+    # 2. Obtener Precipitación (Arquitectura Híbrida)
     final_rainfall = 0.0
     if rainfall_mm is not None:
         final_rainfall = rainfall_mm
     else:
-        # Si no hay lluvia explícita ni fechas, asumimos el día de hoy para un pronóstico "en vivo"
-        start = event_start or datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        end = event_end or datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        
         try:
-            rain_data = fetch_rainfall(lat, lon, start, end)
-            if "hourly" in rain_data and "precipitation" in rain_data["hourly"]:
-                final_rainfall = sum([r for r in rain_data["hourly"]["precipitation"] if r is not None])
+            # Lluvia ya caída (observada por GPM IMERG en las últimas horas)
+            start = event_start or (datetime.now(timezone.utc) - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+            end = event_end or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            rain_observed = fetch_rainfall_gpm(bbox, start, end)
+            
+            # Lluvia futura (pronóstico Open-Meteo próximas horas)
+            # Solo la agregamos si estamos pidiendo datos "en vivo" (es decir, no pasamos fechas históricas explícitas)
+            rain_forecast = 0.0
+            if not event_start and not event_end:
+                rain_forecast = fetch_rainfall_forecast(lat, lon, hours_ahead=24)
+                
+            final_rainfall = rain_observed + rain_forecast
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Error fetching rainfall: {e}")
+            raise HTTPException(status_code=500, detail=f"Error fetching hybrid rainfall data: {e}")
             
     # 3. Descargar Rasters de PC (Satélite)
     try:

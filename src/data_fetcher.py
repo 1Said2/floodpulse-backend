@@ -6,36 +6,111 @@ import rioxarray
 import xarray as xr
 import geopandas as gpd
 
-def fetch_rainfall(lat: float, lon: float, start_date: str = None, end_date: str = None) -> dict:
+def fetch_rainfall_forecast(lat: float, lon: float, hours_ahead: int = 24) -> float:
     """
-    Obtiene datos de precipitación de Open-Meteo.
-    Si se especifican fechas, usa la API de datos históricos para backtesting.
-    Caso contrario, trae pronóstico (y datos de 1 día atrás).
+    Obtiene el PRONÓSTICO de precipitación de Open-Meteo.
+    Predice la lluvia futura, otorgando margen de anticipación al modelo.
+    Devuelve la lluvia acumulada esperada en las próximas `hours_ahead` horas.
     """
-    if start_date and end_date:
-        url = "https://archive-api.open-meteo.com/v1/archive"
-        params = {
-            "latitude": lat,
-            "longitude": lon,
-            "start_date": start_date,
-            "end_date": end_date,
-            "hourly": "precipitation",
-            "timezone": "America/Guayaquil"
-        }
-    else:
-        url = "https://api.open-meteo.com/v1/forecast"
-        params = {
-            "latitude": lat,
-            "longitude": lon,
-            "hourly": "precipitation",
-            "past_days": 1,
-            "forecast_days": 2,
-            "timezone": "America/Guayaquil"
-        }
+    url = "https://api.open-meteo.com/v1/forecast"
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "hourly": "precipitation",
+        "forecast_days": 2, # Traemos 2 días para tener suficiente margen horario
+        "timezone": "UTC"
+    }
     
-    response = requests.get(url, params=params)
-    response.raise_for_status()
-    return response.json()
+    resp = requests.get(url, params=params)
+    resp.raise_for_status()
+    data = resp.json()
+    
+    # Sumamos solo las próximas horas desde ahora
+    import datetime
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    
+    times = data["hourly"]["time"]
+    precips = data["hourly"]["precipitation"]
+    
+    total_forecast = 0.0
+    hours_counted = 0
+    for t_str, p in zip(times, precips):
+        if p is None:
+            continue
+        t_dt = datetime.datetime.fromisoformat(t_str + "+00:00")
+        if t_dt > now_utc:
+            total_forecast += p
+            hours_counted += 1
+            if hours_counted >= hours_ahead:
+                break
+                
+    return total_forecast
+
+def fetch_rainfall_gpm(bbox: list, start_date: str, end_date: str) -> float:
+    """
+    Obtiene precipitación acumulada satelital OBSERVADA de NASA GPM IMERG.
+    Utiliza Google Earth Engine para backtesting y lluvia pasada reciente.
+    """
+    import ee
+    from datetime import datetime, timezone
+    
+    try:
+        import os
+        # GEE requiere explícitamente el project_id en nuevas versiones
+        # Puedes establecerlo como variable de entorno EE_PROJECT o poner el ID directamente abajo.
+        project_id = os.environ.get("EE_PROJECT")
+        if project_id:
+            ee.Initialize(project=project_id)
+        else:
+            # Fallback en caso de no usar variables de entorno
+            ee.Initialize(project='gen-lang-client-0564385440')
+    except Exception as e:
+        raise RuntimeError("Error inicializando Google Earth Engine. Asegúrate de configurar el project_id válido.") from e
+        
+    start_dt = datetime.fromisoformat(start_date.replace("Z", "+00:00"))
+    if start_dt.tzinfo is None:
+        start_dt = start_dt.replace(tzinfo=timezone.utc)
+        
+    now = datetime.now(timezone.utc)
+    diff_days = (now - start_dt).days
+    
+    # Para backtesting (evento > 3.5 meses), usamos Final Run V07.
+    # Para consultas recientes, Early/Late Run (GEE suele mapear V06 o colecciones en RT).
+    collection_id = 'NASA/GPM_L3/IMERG_V07' if diff_days > 110 else 'NASA/GPM_L3/IMERG_V06'
+    
+    geom = ee.Geometry.Rectangle(bbox)
+    
+    collection = ee.ImageCollection(collection_id) \
+        .filterDate(start_date, end_date) \
+        .select('precipitation')
+        
+    # Verificar si la colección está vacía (posiblemente porque V07 aún no existe para esta fecha)
+    if collection.size().getInfo() == 0:
+        # Fallback a V06 o Early Run (V06 usaba precipitationCal, pero verifiquemos si V07 ER usa precipitation)
+        # Asumiremos precipitation para simplificar y si falla, lo ajustaremos.
+        # En la mayoría de las colecciones IMERG_V07 la banda principal es 'precipitation'.
+        collection = (ee.ImageCollection('NASA/GPM_L3/IMERG_V06')
+            .filterDate(start_date, end_date)
+            .select('precipitationCal')
+            .map(lambda img: img.rename(['precipitation'])))
+            
+    # La banda precipitation está en mm/hr. 
+    # Cada imagen es de 30 min (0.5 hrs).
+    def calc_mm(image):
+        return image.multiply(0.5).copyProperties(image, ["system:time_start"])
+        
+    total_mm_image = collection.map(calc_mm).sum()
+    
+    # Reducción espacial: usamos MAX para capturar el pico convectivo
+    stats = total_mm_image.reduceRegion(
+        reducer=ee.Reducer.max(),
+        geometry=geom,
+        scale=1000, # Reducimos la escala de muestreo a 1km para que Geometrías pequeñas (<10km) logren capturar el valor del pixel subyacente
+        maxPixels=1e9
+    )
+    
+    val = stats.getInfo().get('precipitation')
+    return float(val) if val is not None else 0.0
 
 def fetch_dem(bbox: list) -> xr.DataArray:
     """

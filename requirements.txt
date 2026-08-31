@@ -11,3 +11,4 @@ pystac-client
 planetary-computer
 requests
 whitebox
+earthengine-api
