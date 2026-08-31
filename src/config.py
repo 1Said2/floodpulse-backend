@@ -4,6 +4,11 @@
 # El CRS ahora se calcula dinámicamente en utils.py, por lo que no se fija aquí.
 
 MODEL_CONFIG = {
+    # Factores de Calibración IMERG vs Pluviómetro
+    "calibration": {
+        "sierra": 1.1417,
+        "costa": 5.1149
+    },
     # Pesos de la fórmula (suma = 1.0)
     "weights": {
         "rainfall": 0.40,

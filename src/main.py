@@ -32,16 +32,41 @@ def evaluate_risk(
     bbox = [lon - bbox_offset_deg, lat - bbox_offset_deg, lon + bbox_offset_deg, lat + bbox_offset_deg]
     crs_metric = get_utm_epsg(lat, lon)
     
-    # 2. Obtener Precipitación (Arquitectura Híbrida)
+    # 2. Descargar Rasters de PC (Satélite) para Elevación y cobertura
+    try:
+        dem_da = fetch_dem(bbox)
+        landcover_da = fetch_land_cover(bbox)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching satellite data: {e}")
+        
+    # Calcular si es Costa o Sierra basado en elevación media
+    mean_elevation = float(dem_da.mean().item())
+    region = "sierra" if mean_elevation > 1000 else "costa"
+    
+    # 3. Obtener Precipitación (Arquitectura Híbrida calibrada)
+    from src.config import MODEL_CONFIG
+    factor = MODEL_CONFIG["calibration"].get(region, 1.0)
+    
     final_rainfall = 0.0
     if rainfall_mm is not None:
         final_rainfall = rainfall_mm
     else:
         try:
-            # Lluvia ya caída (observada por GPM IMERG en las últimas horas)
+            # Lluvia ya caída (observada por GPM IMERG en las últimas horas) calibrada
             start = event_start or (datetime.now(timezone.utc) - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
             end = event_end or datetime.now(timezone.utc).strftime("%Y-%m-%d")
-            rain_observed = fetch_rainfall_gpm(bbox, start, end)
+            rain_gpm = fetch_rainfall_gpm(bbox, start, end) * factor
+            
+            # Lluvia histórica de Open-Meteo (Ensamble para cubrir ceguera a nubes cálidas)
+            # Solo la consultamos si tenemos fechas históricas explícitas, para no retrasar llamadas en vivo,
+            # o podemos consultarla siempre. El endpoint de archive-api tiene delay de unos días, así que 
+            # si es en vivo (no event_start), el forecast lo cubrirá.
+            rain_archive = 0.0
+            if event_start and event_end:
+                from src.data_fetcher import fetch_rainfall_archive
+                rain_archive = fetch_rainfall_archive(lat, lon, start, end)
+                
+            rain_observed = max(rain_gpm, rain_archive)
             
             # Lluvia futura (pronóstico Open-Meteo próximas horas)
             # Solo la agregamos si estamos pidiendo datos "en vivo" (es decir, no pasamos fechas históricas explícitas)
@@ -52,13 +77,6 @@ def evaluate_risk(
             final_rainfall = rain_observed + rain_forecast
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Error fetching hybrid rainfall data: {e}")
-            
-    # 3. Descargar Rasters de PC (Satélite)
-    try:
-        dem_da = fetch_dem(bbox)
-        landcover_da = fetch_land_cover(bbox)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching satellite data: {e}")
         
     # 4. Manejar Fallback y descargar OSM
     fallback_list = None

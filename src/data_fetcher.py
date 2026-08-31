@@ -45,6 +45,37 @@ def fetch_rainfall_forecast(lat: float, lon: float, hours_ahead: int = 24) -> fl
                 break
                 
     return total_forecast
+def fetch_rainfall_archive(lat: float, lon: float, start_date: str, end_date: str) -> float:
+    """
+    Obtiene precipitación histórica desde el modelo de reanálisis de Open-Meteo.
+    Se utiliza en ensamble con GPM IMERG para cubrir las fallas de detección de nubes cálidas.
+    """
+    url = "https://archive-api.open-meteo.com/v1/archive"
+    # start_date y end_date deben estar en formato YYYY-MM-DD
+    # Extraer solo la fecha si viene con hora (ej. 2023-06-03T00:00:00Z -> 2023-06-03)
+    start = start_date[:10]
+    end = end_date[:10]
+    
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "start_date": start,
+        "end_date": end,
+        "hourly": "precipitation",
+        "timezone": "UTC"
+    }
+    
+    resp = requests.get(url, params=params)
+    if resp.status_code != 200:
+        print(f"Error Open-Meteo archive: {resp.text}")
+        return 0.0
+        
+    data = resp.json()
+    precips = data.get("hourly", {}).get("precipitation", [])
+    
+    # Sumar toda la precipitación de la ventana
+    total = sum(p for p in precips if p is not None)
+    return total
 
 def fetch_rainfall_gpm(bbox: list, start_date: str, end_date: str) -> float:
     """
