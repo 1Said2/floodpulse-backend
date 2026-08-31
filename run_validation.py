@@ -20,7 +20,7 @@ events = [
     {"name": "Salinas", "lat": -2.222, "lon": -80.958, "start": "2025-02-22", "end": "2025-02-23", "real": 77.5, "fallback": None},
     {"name": "Guayaquil (Yaku)", "lat": -2.155, "lon": -79.883, "start": "2023-03-23", "end": "2023-03-24", "real": 199.5, "fallback": None},
     {"name": "Guayaquil (Peor 2025)", "lat": -2.155, "lon": -79.883, "start": "2025-04-01", "end": "2025-04-03", "real": 275.2, "fallback": None},
-    {"name": "Guayaquil (C4 Jun 2026)", "lat": -2.2, "lon": -79.9, "start": "2026-06-07", "end": "2026-06-09", "real": 62.67, "fallback": None},
+    {"name": "Guayaquil (C4 Jun 2026)", "lat": -2.1932, "lon": -79.8789, "start": "2026-06-07", "end": "2026-06-09", "real": 62.67, "fallback": None},
 ]
 
 print(f"{'Location':<25} | {'Date':<20} | {'Real mm':<10} | {'Calib mm':<10} | {'Risk Score':<10} | {'High Risk?':<10}")

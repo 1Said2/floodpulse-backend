@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional, List
 from fastapi import FastAPI, Query, HTTPException
 from pydantic import BaseModel
@@ -53,7 +53,7 @@ def evaluate_risk(
     else:
         try:
             # Lluvia ya caída (observada por GPM IMERG en las últimas horas) calibrada
-            start = event_start or (datetime.now(timezone.utc) - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+            start = event_start or (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
             end = event_end or datetime.now(timezone.utc).strftime("%Y-%m-%d")
             rain_gpm = fetch_rainfall_gpm(bbox, start, end) * factor
             

@@ -102,6 +102,14 @@ def fetch_rainfall_gpm(bbox: list, start_date: str, end_date: str) -> float:
     if start_dt.tzinfo is None:
         start_dt = start_dt.replace(tzinfo=timezone.utc)
         
+    end_dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+    if end_dt.tzinfo is None:
+        end_dt = end_dt.replace(tzinfo=timezone.utc)
+        
+    from datetime import timedelta
+    # filterDate in GEE is exclusive for the end date, so we add 1 day to include it
+    end_date_gee = (end_dt + timedelta(days=1)).strftime("%Y-%m-%d")
+        
     now = datetime.now(timezone.utc)
     diff_days = (now - start_dt).days
     
@@ -112,7 +120,7 @@ def fetch_rainfall_gpm(bbox: list, start_date: str, end_date: str) -> float:
     geom = ee.Geometry.Rectangle(bbox)
     
     collection = ee.ImageCollection(collection_id) \
-        .filterDate(start_date, end_date) \
+        .filterDate(start_date, end_date_gee) \
         .select('precipitation')
         
     # Verificar si la colección está vacía (posiblemente porque V07 aún no existe para esta fecha)
@@ -121,7 +129,7 @@ def fetch_rainfall_gpm(bbox: list, start_date: str, end_date: str) -> float:
         # Asumiremos precipitation para simplificar y si falla, lo ajustaremos.
         # En la mayoría de las colecciones IMERG_V07 la banda principal es 'precipitation'.
         collection = (ee.ImageCollection('NASA/GPM_L3/IMERG_V06')
-            .filterDate(start_date, end_date)
+            .filterDate(start_date, end_date_gee)
             .select('precipitationCal')
             .map(lambda img: img.rename(['precipitation'])))
             
@@ -215,15 +223,21 @@ def fetch_osm_network(bbox: list, fallback_coords: list = None) -> gpd.GeoDataFr
     except ox._errors.InsufficientResponseError:
         print("ADVERTENCIA: No se encontraron elementos de agua en OSM para esta zona. (Puede ser canal embovedado/subterráneo).")
     except Exception as e:
-        print(f"ADVERTENCIA: Error consultando OSM: {e}")
+        error_msg = str(e).lower()
+        if "timeout" in error_msg or "time out" in error_msg or "timed out" in error_msg:
+            print("ERROR CRÍTICO: La consulta a OSM falló por Timeout de red, no por falta de datos.")
+            raise RuntimeError(f"OSM Timeout: {e}") from e
+        else:
+            print(f"ERROR CRÍTICO: Error inesperado consultando OSM: {e}")
+            raise RuntimeError(f"OSM Error: {e}") from e
         
     if gdf.empty:
         if fallback_coords:
-            print("ADVERTENCIA: La consulta a OSM retornó vacío. Utilizando geometría de respaldo (fallback)...")
+            print("INFO: La consulta a OSM retornó vacío (sin cauces naturales). Utilizando geometría de respaldo manual (fallback)...")
             line = LineString(fallback_coords)
             # Crear un GDF mínimo con el LineString
             gdf = gpd.GeoDataFrame({"waterway": ["fallback"]}, geometry=[line], crs="EPSG:4326")
         else:
-            print("ADVERTENCIA: La consulta a OSM retornó vacío y no hay fallback disponible.")
+            print("ADVERTENCIA: La consulta a OSM retornó vacío y no hay fallback disponible. Distancia a cauce será 0.")
             
     return gdf
