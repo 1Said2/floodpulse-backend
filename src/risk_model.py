@@ -9,7 +9,7 @@ import rasterio
 from rasterio.mask import mask
 from src.config import MODEL_CONFIG
 
-def create_grid(bbox: list, resolution_m: int = 100, crs_metric: str = MODEL_CONFIG["crs_metric"]) -> gpd.GeoDataFrame:
+def create_grid(bbox: list, crs_metric: str, resolution_m: int = 100) -> gpd.GeoDataFrame:
     """
     Crea una grilla regular de micro-sectores sobre el bounding box dado.
     """
@@ -71,7 +71,7 @@ def calculate_twi(dem_da, tmp_dir: str = "tmp") -> str:
     
     return os.path.join(tmp_dir, "twi.tif")
 
-def get_twi_for_grid(grid_gdf: gpd.GeoDataFrame, twi_tif_path: str, crs_metric: str = MODEL_CONFIG["crs_metric"]) -> np.ndarray:
+def get_twi_for_grid(grid_gdf: gpd.GeoDataFrame, twi_tif_path: str, crs_metric: str) -> np.ndarray:
     """
     Extrae el TWI promedio para cada celda de la grilla usando zonal stats o muestreo de puntos.
     """
@@ -94,7 +94,7 @@ def get_twi_for_grid(grid_gdf: gpd.GeoDataFrame, twi_tif_path: str, crs_metric: 
                 
     return np.array(twi_values)
 
-def calculate_distance_to_channel(grid_gdf: gpd.GeoDataFrame, waterways_gdf: gpd.GeoDataFrame, crs_metric: str = MODEL_CONFIG["crs_metric"]) -> np.ndarray:
+def calculate_distance_to_channel(grid_gdf: gpd.GeoDataFrame, waterways_gdf: gpd.GeoDataFrame, crs_metric: str) -> np.ndarray:
     """
     Calcula la distancia mínima desde cada celda al cauce más cercano en metros.
     """
@@ -143,18 +143,18 @@ def calculate_imperviousness(grid_gdf: gpd.GeoDataFrame, landcover_da) -> np.nda
                 
     return np.array(imperv_ratios)
 
-def compute_flood_risk(rainfall_mm: float, dem_da, landcover_da, waterways_gdf, bbox: list) -> tuple:
+def compute_flood_risk(rainfall_mm: float, dem_da, landcover_da, waterways_gdf, bbox: list, crs_metric: str) -> tuple:
     """
     Motor matemático que combina todo.
     Devuelve: (riesgo_global_maximo, grid_geojson_dict)
     """
     # 1. Crear grilla
-    grid_gdf = create_grid(bbox, resolution_m=100)
+    grid_gdf = create_grid(bbox, crs_metric=crs_metric, resolution_m=100)
     
     # 2. Calcular factores crudos
     twi_tif = calculate_twi(dem_da)
-    twi_vals = get_twi_for_grid(grid_gdf, twi_tif)
-    dist_vals = calculate_distance_to_channel(grid_gdf, waterways_gdf)
+    twi_vals = get_twi_for_grid(grid_gdf, twi_tif, crs_metric=crs_metric)
+    dist_vals = calculate_distance_to_channel(grid_gdf, waterways_gdf, crs_metric=crs_metric)
     imperv_vals = calculate_imperviousness(grid_gdf, landcover_da)
     
     # 3. Normalizar de 0 a 1 usando umbrales

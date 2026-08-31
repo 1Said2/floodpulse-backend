@@ -86,12 +86,16 @@ from shapely.geometry import LineString
 
 def fetch_osm_network(bbox: list, fallback_coords: list = None) -> gpd.GeoDataFrame:
     """
-    Descarga vías de drenaje (waterway) y cuerpos de agua desde OpenStreetMap usando osmnx.
-    Si la consulta retorna vacía (ej. colector embovedado) y se provee fallback_coords,
-    retorna un GeoDataFrame usando ese trazado manual.
+    Descarga la red de drenaje usando OSMnx (canales, ríos, etc.).
+    Si falla o devuelve vacío, usa el fallback si está disponible.
     """
+    # Cambiar el endpoint principal a uno más estable y bajar el timeout
+    ox.settings.overpass_endpoint = 'https://overpass.kumi.systems/api/interpreter'
+    ox.settings.timeout = 30
+    
     minx, miny, maxx, maxy = bbox
-    # En OSMnx 2.x, el orden es (left, bottom, right, top) es decir (minx, miny, maxx, maxy)
+    # bbox en OSMnx 2.x es (north, south, east, west) -> (maxy, miny, maxx, minx)
+    # Ajustamos a la sintaxis esperada (north, south, east, west)
     
     tags = {
         "waterway": True,
