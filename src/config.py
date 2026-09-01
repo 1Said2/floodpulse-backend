@@ -7,17 +7,16 @@ MODEL_CONFIG = {
     # Factores de Calibración IMERG vs Pluviómetro
     # Pesos de la fórmula (suma = 1.0)
     "weights": {
-        "rainfall": 0.717,     # Softmax de 2.8298
-        "distance": 0.203,     # Softmax de 1.5695
-        "twi": 0.067,          # Softmax de 0.4615
-        "impervious": 0.013    # Softmax de -1.1907
+        "rainfall": 0.40,
+        "twi": 0.20,
+        "distance": 0.25,
+        "impervious": 0.15
     },
     
-    # Factores de calibración regional satélite vs Open-Meteo
+    # Factores de Calibración IMERG vs Pluviómetro (Valores Originales Conservadores)
     "calibration": {
-        "costa": 3.27,
-        "sierra": 4.03,
-        "amazonia": 11.42
+        "sierra": 1.1417,
+        "costa": 5.1149
     },
     
     # Umbrales para normalizar de 0 a 1
