@@ -5,16 +5,19 @@
 
 MODEL_CONFIG = {
     # Factores de Calibración IMERG vs Pluviómetro
-    "calibration": {
-        "sierra": 1.1417,
-        "costa": 5.1149
-    },
     # Pesos de la fórmula (suma = 1.0)
     "weights": {
-        "rainfall": 0.40,
-        "twi": 0.20,
-        "distance": 0.25,
-        "impervious": 0.15
+        "rainfall": 0.717,     # Softmax de 2.8298
+        "distance": 0.203,     # Softmax de 1.5695
+        "twi": 0.067,          # Softmax de 0.4615
+        "impervious": 0.013    # Softmax de -1.1907
+    },
+    
+    # Factores de calibración regional satélite vs Open-Meteo
+    "calibration": {
+        "costa": 3.27,
+        "sierra": 4.03,
+        "amazonia": 11.42
     },
     
     # Umbrales para normalizar de 0 a 1
@@ -25,5 +28,10 @@ MODEL_CONFIG = {
         "safe_distance_m": 500.0,
         # Asumimos que un TWI muy alto (ej. > 15) es propensión máxima a acumular agua.
         "max_twi": 15.0
+    },
+
+    # Umbral global para emitir alerta
+    "predicted_flood": {
+        "risk_threshold": 60.0
     }
 }
