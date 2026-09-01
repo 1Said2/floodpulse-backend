@@ -21,9 +21,13 @@ def fetch_rainfall_forecast(lat: float, lon: float, hours_ahead: int = 24) -> fl
         "timezone": "UTC"
     }
     
-    resp = requests.get(url, params=params)
-    resp.raise_for_status()
-    data = resp.json()
+    try:
+        resp = requests.get(url, params=params, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+    except (requests.exceptions.RequestException, ValueError) as e:
+        print(f"Error Open-Meteo forecast: {resp.text[:200] if 'resp' in locals() and hasattr(resp, 'text') else str(e)}")
+        return 0.0
     
     # Sumamos solo las próximas horas desde ahora
     import datetime
@@ -65,12 +69,14 @@ def fetch_rainfall_archive(lat: float, lon: float, start_date: str, end_date: st
         "timezone": "UTC"
     }
     
-    resp = requests.get(url, params=params)
-    if resp.status_code != 200:
-        print(f"Error Open-Meteo archive: {resp.text}")
+    try:
+        resp = requests.get(url, params=params, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+    except (requests.exceptions.RequestException, ValueError) as e:
+        print(f"Error Open-Meteo archive: {resp.text[:200] if 'resp' in locals() and hasattr(resp, 'text') else str(e)}")
         return 0.0
         
-    data = resp.json()
     precips = data.get("hourly", {}).get("precipitation", [])
     
     # Sumar toda la precipitación de la ventana
@@ -96,7 +102,8 @@ def fetch_rainfall_gpm(bbox: list, start_date: str, end_date: str) -> float:
             # Fallback en caso de no usar variables de entorno
             ee.Initialize(project='gen-lang-client-0564385440')
     except Exception as e:
-        raise RuntimeError("Error inicializando Google Earth Engine. Asegúrate de configurar el project_id válido.") from e
+        print(f"Error inicializando Google Earth Engine: {e}")
+        return 0.0
         
     start_dt = datetime.fromisoformat(start_date.replace("Z", "+00:00"))
     if start_dt.tzinfo is None:
@@ -148,8 +155,12 @@ def fetch_rainfall_gpm(bbox: list, start_date: str, end_date: str) -> float:
         maxPixels=1e9
     )
     
-    val = stats.getInfo().get('precipitation')
-    return float(val) if val is not None else 0.0
+    try:
+        val = stats.getInfo().get('precipitation')
+        return float(val) if val is not None else 0.0
+    except Exception as e:
+        print(f"Error GEE getInfo: {str(e)}")
+        return 0.0
 
 def fetch_dem(bbox: list) -> xr.DataArray:
     """
@@ -204,8 +215,10 @@ def fetch_osm_network(bbox: list, fallback_coords: list = None) -> gpd.GeoDataFr
     Si falla o devuelve vacío, usa el fallback si está disponible.
     """
     # Cambiar el endpoint principal a uno más estable y bajar el timeout
-    ox.settings.overpass_endpoint = 'https://overpass.kumi.systems/api/interpreter'
-    ox.settings.timeout = 30
+    ox.settings.overpass_url = 'https://overpass.kumi.systems/api/interpreter'
+    ox.settings.requests_timeout = 15
+    # Desactivar la verificación de rate limit (que causa esperas de 60s si falla el endpoint /status)
+    ox.settings.overpass_rate_limit = False
     
     minx, miny, maxx, maxy = bbox
     # bbox en OSMnx 2.x es (north, south, east, west) -> (maxy, miny, maxx, minx)
@@ -215,6 +228,27 @@ def fetch_osm_network(bbox: list, fallback_coords: list = None) -> gpd.GeoDataFr
         "waterway": True,
         "natural": ["water"]
     }
+    
+    # Prevenir cualquier reintento automático de requests/urllib3 inyectando una sesión parcheada
+    import requests
+    from requests.adapters import HTTPAdapter
+    from urllib3.util.retry import Retry
+    
+    original_post = requests.post
+    original_get = requests.get
+    
+    def custom_request(method):
+        def wrapper(*args, **kwargs):
+            session = requests.Session()
+            retries = Retry(total=0, connect=0, read=0)
+            adapter = HTTPAdapter(max_retries=retries)
+            session.mount('http://', adapter)
+            session.mount('https://', adapter)
+            return session.request(method, *args, **kwargs)
+        return wrapper
+        
+    requests.post = custom_request('POST')
+    requests.get = custom_request('GET')
     
     gdf = gpd.GeoDataFrame()
     try:
@@ -230,6 +264,10 @@ def fetch_osm_network(bbox: list, fallback_coords: list = None) -> gpd.GeoDataFr
         else:
             print(f"ERROR CRÍTICO: Error inesperado consultando OSM: {e}")
             raise RuntimeError(f"OSM Error: {e}") from e
+    finally:
+        # Restaurar requests original
+        requests.post = original_post
+        requests.get = original_get
         
     if gdf.empty:
         if fallback_coords:
