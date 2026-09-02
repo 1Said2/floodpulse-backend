@@ -6,6 +6,19 @@ import rioxarray
 import xarray as xr
 import geopandas as gpd
 
+# Último error por fuente externa. main.py lo lee para devolver `warnings`
+# al dashboard en vez de fallar en silencio (las funciones de lluvia devuelven 0.0 si algo falla).
+LAST_ERRORS: dict = {}
+
+
+def _set_error(fuente: str, msg):
+    LAST_ERRORS[fuente] = str(msg)[:300]
+    print(f"[{fuente}] {LAST_ERRORS[fuente]}")
+
+
+def _clear_error(fuente: str):
+    LAST_ERRORS.pop(fuente, None)
+
 def fetch_rainfall_forecast(lat: float, lon: float, hours_ahead: int = 24) -> float:
     """
     Obtiene el PRONÓSTICO de precipitación de Open-Meteo.
@@ -25,8 +38,9 @@ def fetch_rainfall_forecast(lat: float, lon: float, hours_ahead: int = 24) -> fl
         resp = requests.get(url, params=params, timeout=15)
         resp.raise_for_status()
         data = resp.json()
+        _clear_error("open-meteo-forecast")
     except (requests.exceptions.RequestException, ValueError) as e:
-        print(f"Error Open-Meteo forecast: {resp.text[:200] if 'resp' in locals() and hasattr(resp, 'text') else str(e)}")
+        _set_error("open-meteo-forecast", f"{resp.text[:200] if 'resp' in locals() and hasattr(resp, 'text') else str(e)}")
         return 0.0
     
     # Sumamos solo las próximas horas desde ahora
@@ -73,8 +87,9 @@ def fetch_rainfall_archive(lat: float, lon: float, start_date: str, end_date: st
         resp = requests.get(url, params=params, timeout=15)
         resp.raise_for_status()
         data = resp.json()
+        _clear_error("open-meteo-archive")
     except (requests.exceptions.RequestException, ValueError) as e:
-        print(f"Error Open-Meteo archive: {resp.text[:200] if 'resp' in locals() and hasattr(resp, 'text') else str(e)}")
+        _set_error("open-meteo-archive", f"{resp.text[:200] if 'resp' in locals() and hasattr(resp, 'text') else str(e)}")
         return 0.0
         
     precips = data.get("hourly", {}).get("precipitation", [])
@@ -101,8 +116,12 @@ def fetch_rainfall_gpm(bbox: list, start_date: str, end_date: str) -> float:
         else:
             # Fallback en caso de no usar variables de entorno
             ee.Initialize(project='gen-lang-client-0564385440')
+        _clear_error("gee")
     except Exception as e:
-        print(f"Error inicializando Google Earth Engine: {e}")
+        # Sin credenciales (earthengine authenticate) o sin proyecto: lluvia observada = 0,
+        # el ensamble sigue con Open-Meteo. main.py lo reporta en `warnings`.
+        _set_error("gee", f"Earth Engine no disponible ({str(e).splitlines()[0]}). "
+                          f"Ejecuta 'earthengine authenticate' o pasa rainfall_mm.")
         return 0.0
         
     start_dt = datetime.fromisoformat(start_date.replace("Z", "+00:00"))
@@ -159,7 +178,7 @@ def fetch_rainfall_gpm(bbox: list, start_date: str, end_date: str) -> float:
         val = stats.getInfo().get('precipitation')
         return float(val) if val is not None else 0.0
     except Exception as e:
-        print(f"Error GEE getInfo: {str(e)}")
+        _set_error("gee", f"Error GEE getInfo: {e}")
         return 0.0
 
 def fetch_dem(bbox: list) -> xr.DataArray:
@@ -209,34 +228,47 @@ def fetch_land_cover(bbox: list) -> xr.DataArray:
 
 from shapely.geometry import LineString
 
+# Servidores Overpass en orden de preferencia. kumi.systems (el original) suele
+# devolver 502/timeout; se prueban en cadena hasta que uno responda.
+OVERPASS_ENDPOINTS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+]
+OVERPASS_TIMEOUT_S = 30
+
+
+class OSMUnavailable(RuntimeError):
+    """Ningún servidor Overpass respondió (no significa que no haya cauces)."""
+
+
 def fetch_osm_network(bbox: list, fallback_coords: list = None) -> gpd.GeoDataFrame:
     """
-    Descarga la red de drenaje usando OSMnx (canales, ríos, etc.).
-    Si falla o devuelve vacío, usa el fallback si está disponible.
+    Descarga la red de drenaje usando OSMnx (canales, ríos, etc.), probando varios
+    servidores Overpass. Si TODOS fallan:
+      - con fallback_coords -> usa el trazado manual (y deja aviso en LAST_ERRORS["osm"])
+      - sin fallback        -> lanza OSMUnavailable (main.py responde 503 con detalle)
+    Si OSM responde pero no hay elementos, usa fallback si existe.
     """
-    # Cambiar el endpoint principal a uno más estable y bajar el timeout
-    ox.settings.overpass_url = 'https://overpass.kumi.systems/api/interpreter'
-    ox.settings.requests_timeout = 15
+    ox.settings.requests_timeout = OVERPASS_TIMEOUT_S
     # Desactivar la verificación de rate limit (que causa esperas de 60s si falla el endpoint /status)
     ox.settings.overpass_rate_limit = False
-    
+    ox.settings.use_cache = True
+
     minx, miny, maxx, maxy = bbox
-    # bbox en OSMnx 2.x es (north, south, east, west) -> (maxy, miny, maxx, minx)
-    # Ajustamos a la sintaxis esperada (north, south, east, west)
-    
     tags = {
         "waterway": True,
-        "natural": ["water"]
+        "natural": ["water"],
     }
-    
-    # Prevenir cualquier reintento automático de requests/urllib3 inyectando una sesión parcheada
+
+    # Prevenir reintentos automáticos de requests/urllib3 (cada uno esperaría el timeout completo)
     import requests
     from requests.adapters import HTTPAdapter
     from urllib3.util.retry import Retry
-    
+
     original_post = requests.post
     original_get = requests.get
-    
+
     def custom_request(method):
         def wrapper(*args, **kwargs):
             session = requests.Session()
@@ -246,36 +278,53 @@ def fetch_osm_network(bbox: list, fallback_coords: list = None) -> gpd.GeoDataFr
             session.mount('https://', adapter)
             return session.request(method, *args, **kwargs)
         return wrapper
-        
+
     requests.post = custom_request('POST')
     requests.get = custom_request('GET')
-    
+
     gdf = gpd.GeoDataFrame()
+    errores = []
+    respondio = False
     try:
-        # Importante: usar features_from_bbox (no graph)
-        gdf = ox.features_from_bbox(bbox=(minx, miny, maxx, maxy), tags=tags)
-    except ox._errors.InsufficientResponseError:
-        print("ADVERTENCIA: No se encontraron elementos de agua en OSM para esta zona. (Puede ser canal embovedado/subterráneo).")
-    except Exception as e:
-        error_msg = str(e).lower()
-        if "timeout" in error_msg or "time out" in error_msg or "timed out" in error_msg:
-            print("ERROR CRÍTICO: La consulta a OSM falló por Timeout de red, no por falta de datos.")
-            raise RuntimeError(f"OSM Timeout: {e}") from e
-        else:
-            print(f"ERROR CRÍTICO: Error inesperado consultando OSM: {e}")
-            raise RuntimeError(f"OSM Error: {e}") from e
+        for url in OVERPASS_ENDPOINTS:
+            ox.settings.overpass_url = url
+            host = url.split("/")[2]
+            try:
+                gdf = ox.features_from_bbox(bbox=(minx, miny, maxx, maxy), tags=tags)
+                respondio = True
+                _clear_error("osm")
+                print(f"INFO: OSM OK via {host} ({len(gdf)} elementos)")
+                break
+            except ox._errors.InsufficientResponseError:
+                respondio = True
+                _clear_error("osm")
+                print(f"ADVERTENCIA: {host} respondió pero no hay elementos de agua en la zona "
+                      f"(puede ser canal embovedado/subterráneo).")
+                break
+            except Exception as e:
+                msg = f"{host}: {str(e)[:120]}"
+                errores.append(msg)
+                print(f"ADVERTENCIA: fallo Overpass {msg} -> probando siguiente servidor")
     finally:
-        # Restaurar requests original
         requests.post = original_post
         requests.get = original_get
-        
+
+    if not respondio:
+        detalle = " | ".join(errores)
+        if fallback_coords:
+            _set_error("osm", f"Ningún servidor Overpass respondió; se usó el trazado manual (fallback). {detalle}")
+            return gpd.GeoDataFrame({"waterway": ["fallback"]},
+                                    geometry=[LineString(fallback_coords)], crs="EPSG:4326")
+        _set_error("osm", f"Ningún servidor Overpass respondió y no hay fallback. {detalle}")
+        raise OSMUnavailable(f"OpenStreetMap (Overpass) no disponible: {detalle}")
+
     if gdf.empty:
         if fallback_coords:
-            print("INFO: La consulta a OSM retornó vacío (sin cauces naturales). Utilizando geometría de respaldo manual (fallback)...")
-            line = LineString(fallback_coords)
-            # Crear un GDF mínimo con el LineString
-            gdf = gpd.GeoDataFrame({"waterway": ["fallback"]}, geometry=[line], crs="EPSG:4326")
+            print("INFO: OSM sin cauces en la zona. Utilizando geometría de respaldo manual (fallback)...")
+            gdf = gpd.GeoDataFrame({"waterway": ["fallback"]},
+                                   geometry=[LineString(fallback_coords)], crs="EPSG:4326")
         else:
-            print("ADVERTENCIA: La consulta a OSM retornó vacío y no hay fallback disponible. Distancia a cauce será 0.")
-            
+            _set_error("osm", "OSM no tiene cauces mapeados en la zona y no se envió fallback_waterway_coords: "
+                              "la distancia al cauce se toma como 'segura' (500 m) y el riesgo puede subestimarse.")
+
     return gdf
