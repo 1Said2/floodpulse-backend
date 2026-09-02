@@ -7,7 +7,11 @@ import whitebox
 import rioxarray
 import rasterio
 from rasterio.mask import mask
+import tempfile
+import threading
 from src.config import MODEL_CONFIG
+
+wbt_lock = threading.Lock()
 
 def create_grid(bbox: list, crs_metric: str, resolution_m: int = 100) -> gpd.GeoDataFrame:
     """
@@ -58,16 +62,17 @@ def calculate_twi(dem_da, tmp_dir: str = "tmp") -> str:
     wbt.set_working_dir(os.path.abspath(tmp_dir))
     wbt.verbose = False
     
-    # 1. Rellenar depresiones (Breach Depressions) para un flujo continuo
-    wbt.breach_depressions("dem.tif", "dem_breached.tif")
-    # 2. Dirección de flujo (D8)
-    wbt.d8_pointer("dem_breached.tif", "d8_pntr.tif")
-    # 3. Acumulación de flujo (Área de captación específica)
-    wbt.d8_flow_accumulation("dem_breached.tif", "flow_accum.tif", out_type="specific contributing area")
-    # 4. Pendiente (Slope)
-    wbt.slope("dem_breached.tif", "slope.tif")
-    # 5. Topographic Wetness Index (TWI)
-    wbt.wetness_index("flow_accum.tif", "slope.tif", "twi.tif")
+    with wbt_lock:
+        # 1. Rellenar depresiones (Breach Depressions) para un flujo continuo
+        wbt.breach_depressions("dem.tif", "dem_breached.tif")
+        # 2. Dirección de flujo (D8)
+        wbt.d8_pointer("dem_breached.tif", "d8_pntr.tif")
+        # 3. Acumulación de flujo (Área de captación específica)
+        wbt.d8_flow_accumulation("dem_breached.tif", "flow_accum.tif", out_type="specific contributing area")
+        # 4. Pendiente (Slope)
+        wbt.slope("dem_breached.tif", "slope.tif")
+        # 5. Topographic Wetness Index (TWI)
+        wbt.wetness_index("flow_accum.tif", "slope.tif", "twi.tif")
     
     return os.path.join(tmp_dir, "twi.tif")
 
@@ -111,13 +116,12 @@ def calculate_distance_to_channel(grid_gdf: gpd.GeoDataFrame, waterways_gdf: gpd
     distances = grid_metric.geometry.centroid.distance(water_union)
     return distances.values
 
-def calculate_imperviousness(grid_gdf: gpd.GeoDataFrame, landcover_da) -> np.ndarray:
+def calculate_imperviousness(grid_gdf: gpd.GeoDataFrame, landcover_da, tmp_dir: str) -> np.ndarray:
     """
     Calcula el % de área impermeable (Clase 50 en ESA WorldCover) por celda.
     """
     # Guardar raster temporalmente para usar rasterio.mask
-    tmp_path = "tmp/lc.tif"
-    os.makedirs("tmp", exist_ok=True)
+    tmp_path = os.path.join(tmp_dir, "lc.tif")
     landcover_da.rio.to_raster(tmp_path)
     
     imperv_ratios = []
@@ -151,11 +155,12 @@ def compute_flood_risk(rainfall_mm: float, dem_da, landcover_da, waterways_gdf, 
     # 1. Crear grilla
     grid_gdf = create_grid(bbox, crs_metric=crs_metric, resolution_m=100)
     
-    # 2. Calcular factores crudos
-    twi_tif = calculate_twi(dem_da)
-    twi_vals = get_twi_for_grid(grid_gdf, twi_tif, crs_metric=crs_metric)
-    dist_vals = calculate_distance_to_channel(grid_gdf, waterways_gdf, crs_metric=crs_metric)
-    imperv_vals = calculate_imperviousness(grid_gdf, landcover_da)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # 2. Calcular factores crudos
+        twi_tif = calculate_twi(dem_da, tmp_dir=tmpdir)
+        twi_vals = get_twi_for_grid(grid_gdf, twi_tif, crs_metric=crs_metric)
+        dist_vals = calculate_distance_to_channel(grid_gdf, waterways_gdf, crs_metric=crs_metric)
+        imperv_vals = calculate_imperviousness(grid_gdf, landcover_da, tmp_dir=tmpdir)
     
     # 3. Normalizar de 0 a 1 usando umbrales
     th = MODEL_CONFIG["thresholds"]
@@ -169,7 +174,13 @@ def compute_flood_risk(rainfall_mm: float, dem_da, landcover_da, waterways_gdf, 
     dist_norm = np.clip(1.0 - (dist_vals / th["safe_distance_m"]), 0.0, 1.0)
     
     # TWI (0 a 1)
-    twi_norm = np.clip(twi_vals / th["max_twi"], 0.0, 1.0)
+    # Umbral dinámico: usamos el percentil 90 del terreno actual (DEM local) como máximo,
+    # en lugar de un valor fijo global, porque la topografía varía mucho por zona.
+    dynamic_max_twi = np.percentile(twi_vals, 90) if len(twi_vals) > 0 else th["max_twi"]
+    if dynamic_max_twi <= 0:
+        dynamic_max_twi = th["max_twi"]
+    
+    twi_norm = np.clip(twi_vals / dynamic_max_twi, 0.0, 1.0)
     
     # Impermeabilidad ya está de 0 a 1
     imperv_norm = imperv_vals

@@ -21,8 +21,8 @@ MODEL_CONFIG = {
     
     # Umbrales para normalizar de 0 a 1
     "thresholds": {
-        # Si la lluvia supera este umbral, el factor de lluvia será 1.0 (máximo riesgo)
-        "max_rainfall_mm": 25.0,
+        # INAMHI define sus advertencias de "lluvia muy alta" en acumulados de 45mm/24h.
+        "max_rainfall_mm": 45.0,
         # Si un punto está más lejos que esto de un cauce, el riesgo por distancia cae a 0.
         "safe_distance_m": 500.0,
         # Asumimos que un TWI muy alto (ej. > 15) es propensión máxima a acumular agua.
