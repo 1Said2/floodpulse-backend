@@ -10,6 +10,22 @@ from src.risk_model import compute_flood_risk
 
 app = FastAPI(title="FloodPulse API", description="Motor de Riesgo de Inundación Hiperlocal")
 
+# CORS: permite que el dashboard (Astro en localhost:4321 / Vercel) consuma /risk
+# directamente desde el navegador. Restringir origins en producción si hace falta.
+from fastapi.middleware.cors import CORSMiddleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET"],
+    allow_headers=["*"],
+)
+
+
+@app.get("/health", tags=["estado"])
+def health():
+    """Sin cálculo: sirve para que el dashboard y el monitor comprueben que el motor está arriba."""
+    return {"ok": True, "servicio": "riesgo"}
+
 from fastapi.responses import JSONResponse
 from fastapi import Request
 
