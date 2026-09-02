@@ -139,9 +139,8 @@ def fetch_rainfall_gpm(bbox: list, start_date: str, end_date: str) -> float:
     now = datetime.now(timezone.utc)
     diff_days = (now - start_dt).days
     
-    # Para backtesting (evento > 3.5 meses), usamos Final Run V07.
-    # Para consultas recientes, Early/Late Run (GEE suele mapear V06 o colecciones en RT).
-    collection_id = 'NASA/GPM_L3/IMERG_V07' if diff_days > 110 else 'NASA/GPM_L3/IMERG_V06'
+    # V06 está deprecada y vacía para fechas recientes. Usamos siempre V07.
+    collection_id = 'NASA/GPM_L3/IMERG_V07'
     
     geom = ee.Geometry.Rectangle(bbox)
     
@@ -149,15 +148,9 @@ def fetch_rainfall_gpm(bbox: list, start_date: str, end_date: str) -> float:
         .filterDate(start_date, end_date_gee) \
         .select('precipitation')
         
-    # Verificar si la colección está vacía (posiblemente porque V07 aún no existe para esta fecha)
     if collection.size().getInfo() == 0:
-        # Fallback a V06 o Early Run (V06 usaba precipitationCal, pero verifiquemos si V07 ER usa precipitation)
-        # Asumiremos precipitation para simplificar y si falla, lo ajustaremos.
-        # En la mayoría de las colecciones IMERG_V07 la banda principal es 'precipitation'.
-        collection = (ee.ImageCollection('NASA/GPM_L3/IMERG_V06')
-            .filterDate(start_date, end_date_gee)
-            .select('precipitationCal')
-            .map(lambda img: img.rename(['precipitation'])))
+        _set_error("gee", f"IMERG {collection_id} no tiene imágenes para la ventana {start_date} a {end_date}: lluvia observada = 0")
+        return 0.0
             
     # La banda precipitation está en mm/hr. 
     # Cada imagen es de 30 min (0.5 hrs).
@@ -179,6 +172,61 @@ def fetch_rainfall_gpm(bbox: list, start_date: str, end_date: str) -> float:
         return float(val) if val is not None else 0.0
     except Exception as e:
         _set_error("gee", f"Error GEE getInfo: {e}")
+        return 0.0
+
+def fetch_rainfall_chirps(bbox: list, start_date: str, end_date: str) -> float:
+    """
+    Obtiene precipitación acumulada satelital de CHIRPS (UCSB-CHG/CHIRPS/DAILY).
+    """
+    import ee
+    from datetime import datetime, timezone, timedelta
+    
+    try:
+        import os
+        project_id = os.environ.get("EE_PROJECT") or 'gen-lang-client-0564385440'
+        ee.Initialize(project=project_id)
+        _clear_error("chirps")
+    except Exception as e:
+        _set_error("chirps", f"Earth Engine no disponible ({str(e).splitlines()[0]}).")
+        return 0.0
+        
+    start_dt = datetime.fromisoformat(start_date.replace("Z", "+00:00"))
+    if start_dt.tzinfo is None:
+        start_dt = start_dt.replace(tzinfo=timezone.utc)
+        
+    end_dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+    if end_dt.tzinfo is None:
+        end_dt = end_dt.replace(tzinfo=timezone.utc)
+        
+    # filterDate in GEE is exclusive for the end date
+    end_date_gee = (end_dt + timedelta(days=1)).strftime("%Y-%m-%d")
+        
+    collection_id = 'UCSB-CHG/CHIRPS/DAILY'
+    geom = ee.Geometry.Rectangle(bbox)
+    
+    collection = ee.ImageCollection(collection_id) \
+        .filterDate(start_date, end_date_gee) \
+        .select('precipitation')
+        
+    if collection.size().getInfo() == 0:
+        _set_error("chirps", f"CHIRPS no tiene imágenes para la ventana {start_date} a {end_date}.")
+        return 0.0
+            
+    # CHIRPS es diario, en mm/día. Sumamos directo.
+    total_mm_image = collection.sum()
+    
+    stats = total_mm_image.reduceRegion(
+        reducer=ee.Reducer.max(),
+        geometry=geom,
+        scale=1000,
+        maxPixels=1e9
+    )
+    
+    try:
+        val = stats.getInfo().get('precipitation')
+        return float(val) if val is not None else 0.0
+    except Exception as e:
+        _set_error("chirps", f"Error GEE getInfo (CHIRPS): {e}")
         return 0.0
 
 def fetch_dem(bbox: list) -> xr.DataArray:

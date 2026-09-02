@@ -35,12 +35,12 @@ Parámetros: `lat`, `lon`, `event_window_start`, `event_window_end`,
 
 ## Cómo funciona la lluvia (arquitectura híbrida, actualizada)
 El sistema combina dos fuentes automáticas, no una sola:
-- **NASA GPM IMERG** (satélite, vía Google Earth Engine): lluvia ya caída,
-  calibrada con un factor de corrección distinto por región (Sierra: 1.14x,
-  Costa: 5.11x — el satélite subestima mucho más en la costa por el tipo
+- **NASA GPM IMERG / CHIRPS** (satélite, vía Google Earth Engine): lluvia ya caída e histórica,
+  calibrada con un factor de corrección distinto por región (Sierra: 2.22x,
+  Costa: 2.14x — el satélite subestima mucho más en la costa por el tipo
   de nube).
 - **Open-Meteo**: pronóstico futuro (para anticipar antes de que la
-  inundación sea visible) y como respaldo histórico cuando IMERG no
+  inundación sea visible) y como respaldo histórico cuando el satélite no
   detecta nada (nubes "cálidas" que el satélite no ve bien).
 El sistema toma el MÁXIMO entre ambas fuentes calibradas — si quieres
 evitar depender de esto durante pruebas locales, usa el parámetro
@@ -54,17 +54,10 @@ Earth Engine y no necesitas ninguna cuenta ni configuración. Si en algún
 punto quieres probar el modo automático completo, avísame y lo vemos.
 
 ## Sectores de referencia validados (para pruebas o demo)
-Tenemos 8 eventos reales documentados con lluvia real conocida — útiles
-para pasar como `rainfall_mm` en tus pruebas:
-- Ajaví, Ibarra: lat 0.35502, lon -78.12463 — 40.8mm (requiere
-  `fallback_waterway_coords`, el colector está embovedado)
-- Malacatos, Loja: lat -3.994537, lon -79.205415 — 40.0mm
-- (el resto de sectores validados están en las notas del equipo — pregúntame
-  si necesitas alguno específico)
+Tenemos 30 eventos reales documentados con validación de campo, exportados en `data/validation_set.json` y el análisis de Curva ROC en `docs/roc_curve.png`.
 
-## Pendiente
-- [ ] Confirmar "control negativo" (zona sin riesgo) con coordenadas
-      verificadas en OpenStreetMap
-- [ ] Terminar de correr los 8 eventos de validación con el nuevo ensamble
-      IMERG + Open-Meteo
-- [ ] Definir el sector final para la demo del sábado
+## Pendiente (HackTech El Niño 2026)
+- [x] Corregir `sys.excepthook` para el modelo WhiteboxTools en Windows.
+- [x] Reemplazar usos de funciones obsoletas como `.unary_union`.
+- [ ] Integrar el umbral óptimo en los repositorios Frontend y Alerts (`alert_threshold`).
+- [ ] Definir el sector final para la demo del sábado (sugerido: Ajaví o Monte Sinaí).

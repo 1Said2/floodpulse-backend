@@ -13,6 +13,7 @@ cache/
 
 # Archivos temporales (ej. de Whitebox)
 tmp/
+tmp2/
 
 # Archivos del sistema
 .DS_Store

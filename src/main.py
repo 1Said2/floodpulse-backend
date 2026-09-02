@@ -16,6 +16,18 @@ from src.data_fetcher import (
 )
 from src.risk_model import compute_flood_risk
 
+import sys
+# Suprimir el molesto error "Error in sys.excepthook" provocado por WhiteboxTools al destruirse en Windows
+original_excepthook = sys.excepthook
+def silent_excepthook(exc_type, exc_value, exc_traceback):
+    if exc_type.__name__ == "FileNotFoundError" and "WBT_log.txt" in str(exc_value):
+        pass # Ignorar error de borrado de log de WhiteboxTools
+    elif exc_type.__name__ == "PermissionError":
+        pass # Ignorar errores de borrado temporal de WhiteboxTools en Windows
+    else:
+        original_excepthook(exc_type, exc_value, exc_traceback)
+sys.excepthook = silent_excepthook
+
 app = FastAPI(title="FloodPulse API", description="Motor de Riesgo de Inundación Hiperlocal")
 
 
@@ -58,6 +70,7 @@ class RiskResponse(BaseModel):
     timestamp: str
     components: dict
     grid_geojson: dict
+    alert_threshold: float
     # Avisos no fatales (GEE sin credenciales, Overpass caído y se usó fallback, etc.)
     # El dashboard los muestra como notificaciones.
     warnings: List[str] = []
@@ -169,12 +182,13 @@ def evaluate_risk(
 
     # 1. Calcular Bounding Box y CRS dinámico
     bbox = [lon - bbox_offset_deg, lat - bbox_offset_deg, lon + bbox_offset_deg, lat + bbox_offset_deg]
+    bbox_4x = [lon - bbox_offset_deg*4, lat - bbox_offset_deg*4, lon + bbox_offset_deg*4, lat + bbox_offset_deg*4]
     crs_metric = get_utm_epsg(lat, lon)
 
     # 2. Descargar Rasters de PC (Satélite) para Elevación y cobertura
     t0 = time.time()
     try:
-        dem_da = fetch_dem(bbox)
+        dem_da = fetch_dem(bbox_4x)
         landcover_da = fetch_land_cover(bbox)
     except Exception as e:
         raise HTTPException(
@@ -208,15 +222,20 @@ def evaluate_risk(
             if "gee" in LAST_ERRORS:
                 warnings.append("Lluvia observada (IMERG) = 0: " + LAST_ERRORS["gee"])
 
-            # Lluvia histórica de Open-Meteo (solo con fechas explícitas: el archivo tiene días de retraso)
+            # Lluvia histórica de Open-Meteo y CHIRPS
             rain_archive = 0.0
+            rain_chirps = 0.0
             if event_start and event_end:
-                from src.data_fetcher import fetch_rainfall_archive
+                from src.data_fetcher import fetch_rainfall_archive, fetch_rainfall_chirps
                 rain_archive = fetch_rainfall_archive(lat, lon, start, end)
                 if "open-meteo-archive" in LAST_ERRORS:
                     warnings.append("Open-Meteo histórico falló: " + LAST_ERRORS["open-meteo-archive"])
+                    
+                rain_chirps = fetch_rainfall_chirps(bbox, start, end) * factor
+                if "chirps" in LAST_ERRORS:
+                    warnings.append("CHIRPS histórico falló: " + LAST_ERRORS["chirps"])
 
-            rain_observed = max(rain_gpm, rain_archive)
+            rain_observed = max(rain_gpm, rain_archive, rain_chirps)
 
             # Lluvia futura (pronóstico Open-Meteo próximas horas) solo en modo "en vivo"
             rain_forecast = 0.0
@@ -231,6 +250,7 @@ def evaluate_risk(
                 "region": region,
                 "factor_calibracion": factor,
                 "gpm_imerg_mm": round(rain_gpm, 2),
+                "chirps_mm": round(rain_chirps, 2),
                 "open_meteo_archivo_mm": round(rain_archive, 2),
                 "open_meteo_pronostico_24h_mm": round(rain_forecast, 2),
                 "ventana": f"{start} a {end}",
@@ -263,7 +283,7 @@ def evaluate_risk(
         warnings.append(LAST_ERRORS["osm"])
     timing["osm_s"] = round(time.time() - t0, 1)
 
-    waterway_source = "none"
+    waterway_source = "dem"
     if not waterways_gdf.empty:
         waterway_source = "fallback" if "fallback" in waterways_gdf.get("waterway", []).tolist() else "osm"
 
@@ -306,6 +326,7 @@ def evaluate_risk(
         timestamp=datetime.now(timezone.utc).isoformat(),
         components=components,
         grid_geojson=grid_geojson,
+        alert_threshold=MODEL_CONFIG.get("predicted_flood", {}).get("risk_threshold", 60.0),
         warnings=warnings,
         timing_s=timing,
     )
