@@ -38,6 +38,12 @@ def evaluate_risk(
     event_end: Optional[str] = Query(None, description="Fecha fin ISO8601 (ej. 2025-04-08)."),
     fallback_waterway_coords: Optional[str] = Query(None, description="JSON string con lista de coords [[lon,lat],...]")
 ):
+    if bbox_offset_deg < 0.002:
+        raise HTTPException(
+            status_code=400,
+            detail=f"bbox_offset_deg demasiado pequeño ({bbox_offset_deg}): por debajo de 0.002 la detección de cauces OSM se degrada silenciosamente y el riesgo puede subestimarse. Usa 0.005 (default) o mayor."
+        )
+
     # 1. Calcular Bounding Box y CRS dinámico
     bbox = [lon - bbox_offset_deg, lat - bbox_offset_deg, lon + bbox_offset_deg, lat + bbox_offset_deg]
     crs_metric = get_utm_epsg(lat, lon)
