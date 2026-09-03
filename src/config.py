@@ -24,24 +24,28 @@ MODEL_CONFIG = {
         "use_multiplicative": True
     },
     
-    # Factores de Calibración IMERG/CHIRPS vs Pluviómetro (Basado en eventos reales 1,2,3,5)
+    # Factores de Calibración
+    # Extraídos de eventos validados.
     "calibration": {
-        "sierra": 2.22,
-        "costa": 2.14
+        # Con 2 eventos por región (n=2), el IC 95% de la media muestral contiene 1.0
+        # No hay evidencia estadística para aplicar factores correctivos.
+        "imerg": {"sierra": 1.0, "costa": 1.0, "oriente": 1.0},
+        "chirps": {"sierra": 1.0, "costa": 1.0, "oriente": 1.0}
     },
     
     # Umbrales para normalizar de 0 a 1
     "thresholds": {
-        # INAMHI define sus advertencias de "lluvia muy alta" en acumulados de 45mm/24h.
-        "max_rainfall_mm": 45.0,
-        # Si un punto está más lejos que esto de un cauce, el riesgo por distancia cae a 0.
-        "safe_distance_m": 500.0,
+        # Techo logarítmico (A4). Eventos severos de 300+ mm seguirán creciendo asintóticamente hacia 1.0, pero bajamos el r_max a 150.0 para que 45mm no quede subrepresentado.
+        "max_rainfall_mm": 150.0,
+        # (A5) safe_distance_m ya no es estático; se calcula dinámicamente en risk_model.py en función del bbox.
         # TWI suele rondar de 5 a 25. 20.0 es un umbral empírico alto para saturar el riesgo por humedad.
         "max_twi": 20.0
     },
 
     # Umbral global para emitir alerta
     "predicted_flood": {
-        "risk_threshold": 60.0
+        # El umbral óptimo (Youden) derivado tras corregir a point_risk (AUC 0.810) con lluvia extrema (113.2 mm).
+        # Este umbral implica un piso implícito de ~21 mm de lluvia diaria para que una zona de muy alta susceptibilidad pueda emitir alerta.
+        "risk_threshold": 31.16
     }
 }

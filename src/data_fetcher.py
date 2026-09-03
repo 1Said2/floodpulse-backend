@@ -290,13 +290,10 @@ class OSMUnavailable(RuntimeError):
     """Ningún servidor Overpass respondió (no significa que no haya cauces)."""
 
 
-def fetch_osm_network(bbox: list, fallback_coords: list = None) -> gpd.GeoDataFrame:
+def fetch_osm_network(bbox: list) -> gpd.GeoDataFrame:
     """
     Descarga la red de drenaje usando OSMnx (canales, ríos, etc.), probando varios
-    servidores Overpass. Si TODOS fallan:
-      - con fallback_coords -> usa el trazado manual (y deja aviso en LAST_ERRORS["osm"])
-      - sin fallback        -> lanza OSMUnavailable (main.py responde 503 con detalle)
-    Si OSM responde pero no hay elementos, usa fallback si existe.
+    servidores Overpass. Si TODOS fallan lanza OSMUnavailable (main.py lo captura).
     """
     ox.settings.requests_timeout = OVERPASS_TIMEOUT_S
     # Desactivar la verificación de rate limit (que causa esperas de 60s si falla el endpoint /status)
@@ -359,20 +356,10 @@ def fetch_osm_network(bbox: list, fallback_coords: list = None) -> gpd.GeoDataFr
 
     if not respondio:
         detalle = " | ".join(errores)
-        if fallback_coords:
-            _set_error("osm", f"Ningún servidor Overpass respondió; se usó el trazado manual (fallback). {detalle}")
-            return gpd.GeoDataFrame({"waterway": ["fallback"]},
-                                    geometry=[LineString(fallback_coords)], crs="EPSG:4326")
-        _set_error("osm", f"Ningún servidor Overpass respondió y no hay fallback. {detalle}")
+        _set_error("osm", f"Ningún servidor Overpass respondió. {detalle}")
         raise OSMUnavailable(f"OpenStreetMap (Overpass) no disponible: {detalle}")
 
     if gdf.empty:
-        if fallback_coords:
-            print("INFO: OSM sin cauces en la zona. Utilizando geometría de respaldo manual (fallback)...")
-            gdf = gpd.GeoDataFrame({"waterway": ["fallback"]},
-                                   geometry=[LineString(fallback_coords)], crs="EPSG:4326")
-        else:
-            _set_error("osm", "OSM no tiene cauces mapeados en la zona y no se envió fallback_waterway_coords: "
-                              "la distancia al cauce se toma como 'segura' (500 m) y el riesgo puede subestimarse.")
+        _set_error("osm", "OSM no tiene cauces mapeados en la zona. Se intentará derivar desde el DEM.")
 
     return gdf

@@ -35,10 +35,7 @@ Parámetros: `lat`, `lon`, `event_window_start`, `event_window_end`,
 
 ## Cómo funciona la lluvia (arquitectura híbrida, actualizada)
 El sistema combina dos fuentes automáticas, no una sola:
-- **NASA GPM IMERG / CHIRPS** (satélite, vía Google Earth Engine): lluvia ya caída e histórica,
-  calibrada con un factor de corrección distinto por región (Sierra: 2.22x,
-  Costa: 2.14x — el satélite subestima mucho más en la costa por el tipo
-  de nube).
+- **NASA GPM IMERG / CHIRPS** (satélite, vía Google Earth Engine): lluvia ya caída e histórica.
 - **Open-Meteo**: pronóstico futuro (para anticipar antes de que la
   inundación sea visible) y como respaldo histórico cuando el satélite no
   detecta nada (nubes "cálidas" que el satélite no ve bien).
@@ -46,15 +43,29 @@ El sistema toma el MÁXIMO entre ambas fuentes calibradas — si quieres
 evitar depender de esto durante pruebas locales, usa el parámetro
 `rainfall_mm` para forzar un valor manual (ver siguiente sección).
 
-## ¿Necesito configurar Google Earth Engine?
+¿Y necesito configurar Google Earth Engine?
 Solo si quieres que el sistema traiga la lluvia automático (modo real/histórico).
 Si solo estás probando el dashboard o la lógica de SMS, **usa siempre el
 parámetro `rainfall_mm`** en tus pruebas — así el sistema nunca llama a
 Earth Engine y no necesitas ninguna cuenta ni configuración. Si en algún
-punto quieres probar el modo automático completo, avísame y lo vemos.
+punto quieres probar el modo automático completo, deberás configurar una Service Account de GEE y poner sus credenciales en `config.py`.
 
-## Sectores de referencia validados (para pruebas o demo)
-Tenemos 30 eventos reales documentados con validación de campo, exportados en `data/validation_set.json` y el análisis de Curva ROC en `docs/roc_curve.png`.
+## 📊 Calibración y Rendimiento
+
+El motor se calibra dinámicamente según la región y ha sido evaluado mediante curvas ROC (Receiver Operating Characteristic) contra datos históricos. 
+La evaluación de susceptibilidad topográfica (`point_risk`) ha validado la capacidad de discriminación del modelo a nivel hiperlocal.
+
+> [!NOTE]
+> **Prueba de Concepto y Piso Implícito de Lluvia**
+> Los resultados actuales (**AUC 0.810**) corresponden a una evaluación controlada de susceptibilidad topográfica sobre una muestra pequeña de 19 puntos (12 positivos y 7 negativos) provenientes de **un solo evento** en una sola ciudad (Guayaquil, abril de 2025). El AUC de 0.810 sirve como **prueba de concepto de la métrica topográfica** bajo lluvia fija (113.2 mm), pero no representa la exactitud (accuracy) final del sistema completo a nivel nacional.
+>
+> **Umbral de Alertas y Escala:** Para el cálculo local de alertas de sector, el sistema evalúa el puntaje máximo zonal (`max_risk_in_bbox`). Sin embargo, el puntaje puntual `point_risk` usado en el umbral analítico (`31.16`) establece un piso operativo implícito de **~21 mm de lluvia diaria** para que el modelo alerte sobre las zonas más vulnerables de la ciudad, un criterio congruente con los avisos meteorológicos del INAMHI.
+
+> [!WARNING]
+> **Limitación de los Datos Negativos (Espaciales)**
+> La ausencia de un sector en un reporte de prensa no prueba definitivamente que no se inundó. Los sectores "negativos" del dataset son una aproximación generada mediante un doble filtro: documental (ausentes en los partes oficiales/noticias) y topográfico (elevación y distancia al cauce claramente superiores a la mediana de los inundados). El modelo asume que estas zonas altas y no reportadas no sufrieron inundación, lo cual debe tenerse en cuenta al interpretar la especificidad del modelo.
+
+![Curva ROC](../floodpulse-validation/roc_curve.png)
 
 ## Pendiente (HackTech El Niño 2026)
 - [x] Corregir `sys.excepthook` para el modelo WhiteboxTools en Windows.

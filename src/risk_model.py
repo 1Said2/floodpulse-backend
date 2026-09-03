@@ -114,7 +114,8 @@ def calculate_distance_to_channel(grid_gdf: gpd.GeoDataFrame, waterways_gdf: gpd
     Calcula la distancia mínima desde cada celda al cauce más cercano en metros.
     """
     if waterways_gdf.empty:
-        return np.full(len(grid_gdf), MODEL_CONFIG["thresholds"]["safe_distance_m"])
+        # Esto en la jerarquía OSM -> DEM -> Fallback casi nunca se ejecuta directo de OSM vacío
+        return np.full(len(grid_gdf), 9999.0)
         
     grid_metric = grid_gdf.to_crs(crs_metric)
     water_metric = waterways_gdf.to_crs(crs_metric)
@@ -140,7 +141,7 @@ def get_distance_from_raster(grid_gdf: gpd.GeoDataFrame, dist_tif_path: str, crs
         for val in src.sample(coords):
             v = val[0]
             if v < 0 or np.isnan(v):
-                dist_values.append(MODEL_CONFIG["thresholds"]["safe_distance_m"])
+                dist_values.append(9999.0) # Se usa un valor muy alto para que clip lo reduzca a safe_distance luego
             else:
                 dist_values.append(float(v))
                 
@@ -177,15 +178,23 @@ def calculate_imperviousness(grid_gdf: gpd.GeoDataFrame, landcover_da, tmp_dir: 
                 
     return np.array(imperv_ratios)
 
-def compute_flood_risk(rainfall_mm: float, dem_da, landcover_da, waterways_gdf, bbox: list, crs_metric: str) -> tuple:
+from shapely.geometry import LineString
+
+def compute_flood_risk(rainfall_mm: float, dem_da, landcover_da, waterways_gdf, bbox: list, crs_metric: str, fallback_coords: list = None, lat: float = None, lon: float = None) -> tuple:
     """
     Motor matemático que combina todo.
-    Devuelve: (riesgo_global_maximo, grid_geojson_dict)
+    Devuelve: (max_risk, point_risk, grid_geojson_dict, waterway_source)
     """
     # 1. Crear grilla
     grid_gdf = create_grid(bbox, crs_metric=crs_metric, resolution_m=100)
     
+    # 1.5 Variables dinámicas y de escala
+    bbox_offset_deg = (bbox[2] - bbox[0]) / 2.0
+    # A5: safe_distance_m escala con el bbox (~ la mitad del ancho). Ej. offset 0.005 -> 250m aprox
+    safe_distance_m = bbox_offset_deg * 111320 * 0.45
+    
     extract_streams = waterways_gdf.empty
+    waterway_source = "osm" if not extract_streams else "dem_derived"
     
     with tempfile.TemporaryDirectory() as tmpdir:
         # 2. Calcular factores crudos
@@ -193,7 +202,26 @@ def compute_flood_risk(rainfall_mm: float, dem_da, landcover_da, waterways_gdf, 
         twi_vals = get_twi_for_grid(grid_gdf, twi_tif, crs_metric=crs_metric)
         
         if extract_streams:
-            dist_vals = get_distance_from_raster(grid_gdf, dist_tif, crs_metric=crs_metric)
+            has_streams = False
+            streams_path = os.path.join(tmpdir, "streams.tif")
+            if os.path.exists(streams_path):
+                with rasterio.open(streams_path) as src:
+                    streams_data = src.read(1)
+                    # A3: Comprobación topográfica real en vez del valor centinela
+                    has_streams = (streams_data > 0).any()
+            
+            if has_streams:
+                dist_vals = get_distance_from_raster(grid_gdf, dist_tif, crs_metric=crs_metric)
+                # Aplicamos límite manual a los píxeles anómalos o muy lejanos
+                dist_vals = np.clip(dist_vals, 0, safe_distance_m)
+            else:
+                if fallback_coords:
+                    waterway_source = "fallback"
+                    print("INFO: DEM sin cauces topográficos (terreno plano/saturado). Usando fallback manual.")
+                    fallback_gdf = gpd.GeoDataFrame({"waterway": ["fallback"]}, geometry=[LineString(fallback_coords)], crs="EPSG:4326")
+                    dist_vals = calculate_distance_to_channel(grid_gdf, fallback_gdf, crs_metric=crs_metric)
+                else:
+                    dist_vals = np.full(len(grid_gdf), safe_distance_m)
         else:
             dist_vals = calculate_distance_to_channel(grid_gdf, waterways_gdf, crs_metric=crs_metric)
             
@@ -203,12 +231,15 @@ def compute_flood_risk(rainfall_mm: float, dem_da, landcover_da, waterways_gdf, 
     th = MODEL_CONFIG["thresholds"]
     w = MODEL_CONFIG["weights"]
     
-    # Lluvia (0 a 1)
-    rain_norm = min(rainfall_mm / th["max_rainfall_mm"], 1.0)
+    # A4: Normalización Logarítmica para la lluvia (evita saturación prematura y separa 51 vs 289 vs 579)
+    # f(r) = ln(1 + r/r0) / ln(1 + r_max/r0)
+    r_max = th.get("max_rainfall_mm", 150.0)
+    r0 = 25.0
+    rain_capped = min(rainfall_mm, r_max)
+    rain_norm = np.log(1.0 + rain_capped / r0) / np.log(1.0 + r_max / r0)
     
     # Distancia (inversa: más cerca = más riesgo)
-    # Si dist == 0 -> riesgo 1. Si dist >= safe_distance -> riesgo 0.
-    dist_norm = np.clip(1.0 - (dist_vals / th["safe_distance_m"]), 0.0, 1.0)
+    dist_norm = np.clip(1.0 - (dist_vals / safe_distance_m), 0.0, 1.0)
     
     # TWI (0 a 1)
     # TWI ahora es absoluto y físicamente realista. Se normaliza contra el max_twi fijo de config.py
@@ -248,7 +279,18 @@ def compute_flood_risk(rainfall_mm: float, dem_da, landcover_da, waterways_gdf, 
     # Obtener el riesgo global máximo
     max_risk = float(grid_gdf["risk_score"].max())
     
+    from shapely.geometry import Point
+    point_risk = max_risk
+    if lat is not None and lon is not None:
+        p = Point(lon, lat)
+        contains_idx = grid_gdf.geometry.contains(p)
+        if contains_idx.any():
+            point_risk = float(grid_gdf.loc[contains_idx, "risk_score"].iloc[0])
+        else:
+            distances = grid_gdf.geometry.centroid.distance(p)
+            point_risk = float(grid_gdf.loc[distances.idxmin(), "risk_score"])
+    
     # Convertir a GeoJSON dictionary
     grid_geojson = json.loads(grid_gdf.to_json())
     
-    return max_risk, grid_geojson
+    return max_risk, point_risk, grid_geojson, waterway_source
