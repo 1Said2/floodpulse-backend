@@ -59,7 +59,7 @@ La evaluación de susceptibilidad topográfica (`point_risk`) ha validado la cap
 > **Prueba de Concepto y Piso Implícito de Lluvia**
 > Los resultados actuales (**AUC 0.810**) corresponden a una evaluación controlada de susceptibilidad topográfica sobre una muestra pequeña de 19 puntos (12 positivos y 7 negativos) provenientes de **un solo evento** en una sola ciudad (Guayaquil, abril de 2025). El AUC de 0.810 sirve como **prueba de concepto de la métrica topográfica** bajo lluvia fija (113.2 mm), pero no representa la exactitud (accuracy) final del sistema completo a nivel nacional.
 >
-> **Umbral de Alertas y Escala:** Para el cálculo local de alertas de sector, el sistema evalúa el puntaje máximo zonal (`max_risk_in_bbox`). Sin embargo, el puntaje puntual `point_risk` usado en el umbral analítico (`31.16`) establece un piso operativo implícito de **~21 mm de lluvia diaria** para que el modelo alerte sobre las zonas más vulnerables de la ciudad, un criterio congruente con los avisos meteorológicos del INAMHI.
+> **Umbral de Alertas y Escala:** Para el cálculo local de alertas de sector, el sistema evalúa exclusivamente el puntaje puntual exacto (`point_risk`). El umbral analítico (`31.16`) establece un piso operativo implícito de **~21 mm de lluvia diaria** para que el modelo alerte sobre las zonas más vulnerables suscritas, un criterio congruente con los avisos meteorológicos del INAMHI.
 
 > [!WARNING]
 > **Limitación de los Datos Negativos (Espaciales)**
