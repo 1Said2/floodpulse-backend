@@ -16,6 +16,18 @@ from src.data_fetcher import (
 )
 from src.risk_model import compute_flood_risk
 
+import sys
+# Suprimir el molesto error "Error in sys.excepthook" provocado por WhiteboxTools al destruirse en Windows
+original_excepthook = sys.excepthook
+def silent_excepthook(exc_type, exc_value, exc_traceback):
+    if exc_type.__name__ == "FileNotFoundError" and "WBT_log.txt" in str(exc_value):
+        pass # Ignorar error de borrado de log de WhiteboxTools
+    elif exc_type.__name__ == "PermissionError":
+        pass # Ignorar errores de borrado temporal de WhiteboxTools en Windows
+    else:
+        original_excepthook(exc_type, exc_value, exc_traceback)
+sys.excepthook = silent_excepthook
+
 app = FastAPI(title="FloodPulse API", description="Motor de Riesgo de Inundación Hiperlocal")
 
 
@@ -58,6 +70,7 @@ class RiskResponse(BaseModel):
     timestamp: str
     components: dict
     grid_geojson: dict
+    alert_threshold: float
     # Avisos no fatales (GEE sin credenciales, Overpass caído y se usó fallback, etc.)
     # El dashboard los muestra como notificaciones.
     warnings: List[str] = []
@@ -169,12 +182,13 @@ def evaluate_risk(
 
     # 1. Calcular Bounding Box y CRS dinámico
     bbox = [lon - bbox_offset_deg, lat - bbox_offset_deg, lon + bbox_offset_deg, lat + bbox_offset_deg]
+    bbox_4x = [lon - bbox_offset_deg*4, lat - bbox_offset_deg*4, lon + bbox_offset_deg*4, lat + bbox_offset_deg*4]
     crs_metric = get_utm_epsg(lat, lon)
 
     # 2. Descargar Rasters de PC (Satélite) para Elevación y cobertura
     t0 = time.time()
     try:
-        dem_da = fetch_dem(bbox)
+        dem_da = fetch_dem(bbox_4x)
         landcover_da = fetch_land_cover(bbox)
     except Exception as e:
         raise HTTPException(
@@ -190,7 +204,10 @@ def evaluate_risk(
 
     # 3. Obtener Precipitación (Arquitectura Híbrida calibrada)
     from src.config import MODEL_CONFIG
-    factor = MODEL_CONFIG["calibration"].get(region, 1.0)
+    
+    # Factores separados por fuente. Por defecto 1.0 si no se ha calibrado
+    factor_imerg = MODEL_CONFIG["calibration"].get("imerg", {}).get(region, 1.0)
+    factor_chirps = MODEL_CONFIG["calibration"].get("chirps", {}).get(region, 1.0)
 
     t0 = time.time()
     final_rainfall = 0.0
@@ -203,40 +220,51 @@ def evaluate_risk(
             start = event_start or (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
             end = event_end or datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-            # Lluvia ya caída (observada por GPM IMERG en las últimas horas) calibrada
-            rain_gpm = fetch_rainfall_gpm(bbox, start, end) * factor
-            if "gee" in LAST_ERRORS:
-                warnings.append("Lluvia observada (IMERG) = 0: " + LAST_ERRORS["gee"])
-
-            # Lluvia histórica de Open-Meteo (solo con fechas explícitas: el archivo tiene días de retraso)
+            from src.data_fetcher import fetch_rainfall_archive, fetch_rainfall_chirps, fetch_live_rainfall
+            
+            rain_gpm = 0.0
+            rain_chirps = 0.0
             rain_archive = 0.0
+            rain_forecast = 0.0
+
             if event_start and event_end:
-                from src.data_fetcher import fetch_rainfall_archive
+                # Eventos históricos: mantenemos la suite satelital completa (IMERG y CHIRPS)
+                rain_gpm = fetch_rainfall_gpm(bbox, start, end) * factor_imerg
+                if "gee" in LAST_ERRORS:
+                    warnings.append("Lluvia observada (IMERG) = 0: " + LAST_ERRORS["gee"])
+                    
+                rain_chirps = fetch_rainfall_chirps(bbox, start, end) * factor_chirps
+                if "chirps" in LAST_ERRORS:
+                    warnings.append("CHIRPS histórico falló: " + LAST_ERRORS["chirps"])
+                    
+                # Open-Meteo Archive para cotejo histórico
                 rain_archive = fetch_rainfall_archive(lat, lon, start, end)
                 if "open-meteo-archive" in LAST_ERRORS:
                     warnings.append("Open-Meteo histórico falló: " + LAST_ERRORS["open-meteo-archive"])
 
-            rain_observed = max(rain_gpm, rain_archive)
-
-            # Lluvia futura (pronóstico Open-Meteo próximas horas) solo en modo "en vivo"
-            rain_forecast = 0.0
-            if not event_start and not event_end:
-                rain_forecast = fetch_rainfall_forecast(lat, lon, hours_ahead=24)
-                if "open-meteo-forecast" in LAST_ERRORS:
-                    warnings.append("Open-Meteo pronóstico falló: " + LAST_ERRORS["open-meteo-forecast"])
+                rain_observed = max(rain_gpm, rain_archive, rain_chirps)
+            else:
+                # Modo en vivo: una sola llamada a Open-Meteo para pasado y futuro
+                rain_archive, rain_forecast = fetch_live_rainfall(lat, lon, past_days=2, hours_ahead=24)
+                if "open-meteo-live" in LAST_ERRORS:
+                    warnings.append("Open-Meteo pronóstico/en vivo falló: " + LAST_ERRORS["open-meteo-live"])
+                
+                rain_observed = rain_archive
 
             final_rainfall = rain_observed + rain_forecast
             rain_detail = {
-                "modo": "real",
+                "modo": "histórico" if (event_start and event_end) else "real",
                 "region": region,
-                "factor_calibracion": factor,
+                "factor_imerg": factor_imerg,
+                "factor_chirps": factor_chirps,
                 "gpm_imerg_mm": round(rain_gpm, 2),
+                "chirps_mm": round(rain_chirps, 2),
                 "open_meteo_archivo_mm": round(rain_archive, 2),
                 "open_meteo_pronostico_24h_mm": round(rain_forecast, 2),
                 "ventana": f"{start} a {end}",
             }
             if final_rainfall == 0.0:
-                warnings.append("Todas las fuentes de lluvia devolvieron 0 mm: el riesgo mostrado es solo la parte estática (terreno).")
+                warnings.append("Todas las fuentes de lluvia devolvieron 0 mm. Como el modelo es multiplicativo, el riesgo calculado es 0.")
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"Error obteniendo lluvia híbrida: {type(e).__name__}: {e}")
     timing["lluvia_s"] = round(time.time() - t0, 1)
@@ -253,59 +281,58 @@ def evaluate_risk(
 
     t0 = time.time()
     try:
-        waterways_gdf = fetch_osm_network(bbox, fallback_coords=fallback_list)
+        # Ya no le pasamos el fallback_list aquí para forzar el flujo OSM -> DEM -> Fallback
+        waterways_gdf = fetch_osm_network(bbox)
     except OSMUnavailable as e:
-        raise HTTPException(
-            status_code=503,
-            detail=f"{e}. Reintenta en unos minutos o envía fallback_waterway_coords con el trazado del cauce."
-        )
-    if "osm" in LAST_ERRORS:
-        warnings.append(LAST_ERRORS["osm"])
+        # En vez de arrojar 503, creamos un GeoDataFrame vacío para obligar al motor a extraer el DEM.
+        waterways_gdf = gpd.GeoDataFrame()
+        if "osm" in LAST_ERRORS:
+            warnings.append(LAST_ERRORS["osm"])
+    
+    # Este source inicial es tentativo, la decisión final ocurre dentro de compute_flood_risk
+    waterway_source = "osm" if not waterways_gdf.empty else "dem_derived"
+    
     timing["osm_s"] = round(time.time() - t0, 1)
-
-    waterway_source = "none"
-    if not waterways_gdf.empty:
-        waterway_source = "fallback" if "fallback" in waterways_gdf.get("waterway", []).tolist() else "osm"
 
     # 5. Motor Matemático
     t0 = time.time()
     try:
-        max_risk, grid_geojson = compute_flood_risk(
+        max_risk, point_risk, grid_geojson, final_waterway_source, point_components = compute_flood_risk(
             rainfall_mm=final_rainfall,
             dem_da=dem_da,
             landcover_da=landcover_da,
             waterways_gdf=waterways_gdf,
             bbox=bbox,
-            crs_metric=crs_metric
+            crs_metric=crs_metric,
+            fallback_coords=fallback_list,
+            lat=lat,
+            lon=lon
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error en el motor matemático (WhiteboxTools/TWI): {type(e).__name__}: {e}")
     timing["modelo_s"] = round(time.time() - t0, 1)
     timing["total_s"] = round(time.time() - t_total, 1)
 
-    # Extraer la celda de máximo riesgo para llenar 'components'
-    features = grid_geojson.get("features", [])
-    components = {}
-    if features:
-        highest = max(features, key=lambda x: x['properties']['risk_score'])
-        props = highest['properties']
-        components = {
-            "rainfall_mm": final_rainfall,
-            "twi_max": props.get("twi_raw", 0),
-            "distance_to_channel_m": props.get("dist_m", 0),
-            "imperviousness_pct": props.get("imperv_pct", 0),
-            "region": region,
-            "waterway_source": waterway_source,
-            "rainfall_detail": rain_detail,
-        }
+    # Llenar 'components' con los valores del punto exacto evaluado
+    components = {
+        "rainfall_mm": final_rainfall,
+        "twi_max": point_components["twi_raw"],
+        "distance_to_channel_m": point_components["dist_m"],
+        "imperviousness_pct": point_components["imperv_pct"],
+        "region": region,
+        "waterway_source": final_waterway_source,
+        "rainfall_detail": rain_detail,
+        "max_risk_in_bbox": max_risk,
+    }
 
     return RiskResponse(
         lat=lat,
         lon=lon,
-        risk_score=max_risk,
+        risk_score=point_risk,
         timestamp=datetime.now(timezone.utc).isoformat(),
         components=components,
         grid_geojson=grid_geojson,
+        alert_threshold=MODEL_CONFIG["predicted_flood"]["risk_threshold"],
         warnings=warnings,
         timing_s=timing,
     )
@@ -342,8 +369,8 @@ def validate_historical_event(
     risk_score = result.risk_score
 
     # Lógica de validación muy sencilla
-    # Asumimos que riesgo > 60 significa predicción de inundación
-    predicted_flood = risk_score > 60.0
+    alert_threshold = MODEL_CONFIG["predicted_flood"]["risk_threshold"]
+    predicted_flood = risk_score > alert_threshold
 
     # Determinamos la métrica
     status = "True Negative"

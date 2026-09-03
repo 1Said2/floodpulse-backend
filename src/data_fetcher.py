@@ -62,7 +62,61 @@ def fetch_rainfall_forecast(lat: float, lon: float, hours_ahead: int = 24) -> fl
             if hours_counted >= hours_ahead:
                 break
                 
+                
     return total_forecast
+
+def fetch_live_rainfall(lat: float, lon: float, past_days: int = 2, hours_ahead: int = 24) -> tuple[float, float]:
+    """
+    Obtiene la precipitación pasada y el pronóstico en una sola llamada usando el endpoint forecast.
+    Ideal para modo en vivo, evitando el endpoint archive (que tiene 5 días de retraso).
+    Retorna (rain_observed, rain_forecast).
+    """
+    url = "https://api.open-meteo.com/v1/forecast"
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "hourly": "precipitation",
+        "past_days": past_days,
+        "forecast_days": 2,
+        "timezone": "UTC"
+    }
+    
+    try:
+        resp = requests.get(url, params=params, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        _clear_error("open-meteo-live")
+    except (requests.exceptions.RequestException, ValueError) as e:
+        _set_error("open-meteo-live", f"Error Open-Meteo Live: {resp.text[:200] if 'resp' in locals() and hasattr(resp, 'text') else str(e)}")
+        return 0.0, 0.0
+    
+    import datetime
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    
+    times = data["hourly"]["time"]
+    precips = data["hourly"]["precipitation"]
+    
+    past_rainfall = 0.0
+    forecast_rainfall = 0.0
+    hours_forecast_counted = 0
+    
+    for t_str, p in zip(times, precips):
+        if p is None:
+            continue
+        t_dt = datetime.datetime.fromisoformat(t_str + "+00:00")
+        if t_dt <= now_utc:
+            # Lluvia pasada en la ventana solicitada (past_days)
+            # Para evitar sumar demasiados días si past_days es alto, sumamos todos los que caen aquí.
+            # Open-Meteo devuelve exactamente desde past_days a las 00:00 hasta forecast_days.
+            past_rainfall += p
+        else:
+            # Lluvia futura
+            if hours_forecast_counted < hours_ahead:
+                forecast_rainfall += p
+                hours_forecast_counted += 1
+                
+    return past_rainfall, forecast_rainfall
+
 def fetch_rainfall_archive(lat: float, lon: float, start_date: str, end_date: str) -> float:
     """
     Obtiene precipitación histórica desde el modelo de reanálisis de Open-Meteo.
@@ -139,9 +193,8 @@ def fetch_rainfall_gpm(bbox: list, start_date: str, end_date: str) -> float:
     now = datetime.now(timezone.utc)
     diff_days = (now - start_dt).days
     
-    # Para backtesting (evento > 3.5 meses), usamos Final Run V07.
-    # Para consultas recientes, Early/Late Run (GEE suele mapear V06 o colecciones en RT).
-    collection_id = 'NASA/GPM_L3/IMERG_V07' if diff_days > 110 else 'NASA/GPM_L3/IMERG_V06'
+    # V06 está deprecada y vacía para fechas recientes. Usamos siempre V07.
+    collection_id = 'NASA/GPM_L3/IMERG_V07'
     
     geom = ee.Geometry.Rectangle(bbox)
     
@@ -149,15 +202,9 @@ def fetch_rainfall_gpm(bbox: list, start_date: str, end_date: str) -> float:
         .filterDate(start_date, end_date_gee) \
         .select('precipitation')
         
-    # Verificar si la colección está vacía (posiblemente porque V07 aún no existe para esta fecha)
     if collection.size().getInfo() == 0:
-        # Fallback a V06 o Early Run (V06 usaba precipitationCal, pero verifiquemos si V07 ER usa precipitation)
-        # Asumiremos precipitation para simplificar y si falla, lo ajustaremos.
-        # En la mayoría de las colecciones IMERG_V07 la banda principal es 'precipitation'.
-        collection = (ee.ImageCollection('NASA/GPM_L3/IMERG_V06')
-            .filterDate(start_date, end_date_gee)
-            .select('precipitationCal')
-            .map(lambda img: img.rename(['precipitation'])))
+        _set_error("gee", f"IMERG {collection_id} no tiene imágenes para la ventana {start_date} a {end_date}: lluvia observada = 0")
+        return 0.0
             
     # La banda precipitation está en mm/hr. 
     # Cada imagen es de 30 min (0.5 hrs).
@@ -179,6 +226,61 @@ def fetch_rainfall_gpm(bbox: list, start_date: str, end_date: str) -> float:
         return float(val) if val is not None else 0.0
     except Exception as e:
         _set_error("gee", f"Error GEE getInfo: {e}")
+        return 0.0
+
+def fetch_rainfall_chirps(bbox: list, start_date: str, end_date: str) -> float:
+    """
+    Obtiene precipitación acumulada satelital de CHIRPS (UCSB-CHG/CHIRPS/DAILY).
+    """
+    import ee
+    from datetime import datetime, timezone, timedelta
+    
+    try:
+        import os
+        project_id = os.environ.get("EE_PROJECT") or 'gen-lang-client-0564385440'
+        ee.Initialize(project=project_id)
+        _clear_error("chirps")
+    except Exception as e:
+        _set_error("chirps", f"Earth Engine no disponible ({str(e).splitlines()[0]}).")
+        return 0.0
+        
+    start_dt = datetime.fromisoformat(start_date.replace("Z", "+00:00"))
+    if start_dt.tzinfo is None:
+        start_dt = start_dt.replace(tzinfo=timezone.utc)
+        
+    end_dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+    if end_dt.tzinfo is None:
+        end_dt = end_dt.replace(tzinfo=timezone.utc)
+        
+    # filterDate in GEE is exclusive for the end date
+    end_date_gee = (end_dt + timedelta(days=1)).strftime("%Y-%m-%d")
+        
+    collection_id = 'UCSB-CHG/CHIRPS/DAILY'
+    geom = ee.Geometry.Rectangle(bbox)
+    
+    collection = ee.ImageCollection(collection_id) \
+        .filterDate(start_date, end_date_gee) \
+        .select('precipitation')
+        
+    if collection.size().getInfo() == 0:
+        _set_error("chirps", f"CHIRPS no tiene imágenes para la ventana {start_date} a {end_date}.")
+        return 0.0
+            
+    # CHIRPS es diario, en mm/día. Sumamos directo.
+    total_mm_image = collection.sum()
+    
+    stats = total_mm_image.reduceRegion(
+        reducer=ee.Reducer.max(),
+        geometry=geom,
+        scale=1000,
+        maxPixels=1e9
+    )
+    
+    try:
+        val = stats.getInfo().get('precipitation')
+        return float(val) if val is not None else 0.0
+    except Exception as e:
+        _set_error("chirps", f"Error GEE getInfo (CHIRPS): {e}")
         return 0.0
 
 def fetch_dem(bbox: list) -> xr.DataArray:
@@ -242,13 +344,10 @@ class OSMUnavailable(RuntimeError):
     """Ningún servidor Overpass respondió (no significa que no haya cauces)."""
 
 
-def fetch_osm_network(bbox: list, fallback_coords: list = None) -> gpd.GeoDataFrame:
+def fetch_osm_network(bbox: list) -> gpd.GeoDataFrame:
     """
     Descarga la red de drenaje usando OSMnx (canales, ríos, etc.), probando varios
-    servidores Overpass. Si TODOS fallan:
-      - con fallback_coords -> usa el trazado manual (y deja aviso en LAST_ERRORS["osm"])
-      - sin fallback        -> lanza OSMUnavailable (main.py responde 503 con detalle)
-    Si OSM responde pero no hay elementos, usa fallback si existe.
+    servidores Overpass. Si TODOS fallan lanza OSMUnavailable (main.py lo captura).
     """
     ox.settings.requests_timeout = OVERPASS_TIMEOUT_S
     # Desactivar la verificación de rate limit (que causa esperas de 60s si falla el endpoint /status)
@@ -311,20 +410,10 @@ def fetch_osm_network(bbox: list, fallback_coords: list = None) -> gpd.GeoDataFr
 
     if not respondio:
         detalle = " | ".join(errores)
-        if fallback_coords:
-            _set_error("osm", f"Ningún servidor Overpass respondió; se usó el trazado manual (fallback). {detalle}")
-            return gpd.GeoDataFrame({"waterway": ["fallback"]},
-                                    geometry=[LineString(fallback_coords)], crs="EPSG:4326")
-        _set_error("osm", f"Ningún servidor Overpass respondió y no hay fallback. {detalle}")
+        _set_error("osm", f"Ningún servidor Overpass respondió. {detalle}")
         raise OSMUnavailable(f"OpenStreetMap (Overpass) no disponible: {detalle}")
 
     if gdf.empty:
-        if fallback_coords:
-            print("INFO: OSM sin cauces en la zona. Utilizando geometría de respaldo manual (fallback)...")
-            gdf = gpd.GeoDataFrame({"waterway": ["fallback"]},
-                                   geometry=[LineString(fallback_coords)], crs="EPSG:4326")
-        else:
-            _set_error("osm", "OSM no tiene cauces mapeados en la zona y no se envió fallback_waterway_coords: "
-                              "la distancia al cauce se toma como 'segura' (500 m) y el riesgo puede subestimarse.")
+        _set_error("osm", "OSM no tiene cauces mapeados en la zona. Se intentará derivar desde el DEM.")
 
     return gdf
