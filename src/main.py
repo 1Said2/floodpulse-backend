@@ -220,36 +220,40 @@ def evaluate_risk(
             start = event_start or (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
             end = event_end or datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-            # Lluvia ya caída (observada por GPM IMERG en las últimas horas) calibrada
-            rain_gpm = fetch_rainfall_gpm(bbox, start, end) * factor_imerg
-            if "gee" in LAST_ERRORS:
-                warnings.append("Lluvia observada (IMERG) = 0: " + LAST_ERRORS["gee"])
-
-            # Lluvia histórica de Open-Meteo y CHIRPS
-            rain_archive = 0.0
+            from src.data_fetcher import fetch_rainfall_archive, fetch_rainfall_chirps, fetch_live_rainfall
+            
+            rain_gpm = 0.0
             rain_chirps = 0.0
+            rain_archive = 0.0
+            rain_forecast = 0.0
+
             if event_start and event_end:
-                from src.data_fetcher import fetch_rainfall_archive, fetch_rainfall_chirps
-                rain_archive = fetch_rainfall_archive(lat, lon, start, end)
-                if "open-meteo-archive" in LAST_ERRORS:
-                    warnings.append("Open-Meteo histórico falló: " + LAST_ERRORS["open-meteo-archive"])
+                # Eventos históricos: mantenemos la suite satelital completa (IMERG y CHIRPS)
+                rain_gpm = fetch_rainfall_gpm(bbox, start, end) * factor_imerg
+                if "gee" in LAST_ERRORS:
+                    warnings.append("Lluvia observada (IMERG) = 0: " + LAST_ERRORS["gee"])
                     
                 rain_chirps = fetch_rainfall_chirps(bbox, start, end) * factor_chirps
                 if "chirps" in LAST_ERRORS:
                     warnings.append("CHIRPS histórico falló: " + LAST_ERRORS["chirps"])
+                    
+                # Open-Meteo Archive para cotejo histórico
+                rain_archive = fetch_rainfall_archive(lat, lon, start, end)
+                if "open-meteo-archive" in LAST_ERRORS:
+                    warnings.append("Open-Meteo histórico falló: " + LAST_ERRORS["open-meteo-archive"])
 
-            rain_observed = max(rain_gpm, rain_archive, rain_chirps)
-
-            # Lluvia futura (pronóstico Open-Meteo próximas horas) solo en modo "en vivo"
-            rain_forecast = 0.0
-            if not event_start and not event_end:
-                rain_forecast = fetch_rainfall_forecast(lat, lon, hours_ahead=24)
-                if "open-meteo-forecast" in LAST_ERRORS:
-                    warnings.append("Open-Meteo pronóstico falló: " + LAST_ERRORS["open-meteo-forecast"])
+                rain_observed = max(rain_gpm, rain_archive, rain_chirps)
+            else:
+                # Modo en vivo: una sola llamada a Open-Meteo para pasado y futuro
+                rain_archive, rain_forecast = fetch_live_rainfall(lat, lon, past_days=2, hours_ahead=24)
+                if "open-meteo-live" in LAST_ERRORS:
+                    warnings.append("Open-Meteo pronóstico/en vivo falló: " + LAST_ERRORS["open-meteo-live"])
+                
+                rain_observed = rain_archive
 
             final_rainfall = rain_observed + rain_forecast
             rain_detail = {
-                "modo": "real",
+                "modo": "histórico" if (event_start and event_end) else "real",
                 "region": region,
                 "factor_imerg": factor_imerg,
                 "factor_chirps": factor_chirps,
@@ -293,7 +297,7 @@ def evaluate_risk(
     # 5. Motor Matemático
     t0 = time.time()
     try:
-        max_risk, point_risk, grid_geojson, final_waterway_source = compute_flood_risk(
+        max_risk, point_risk, grid_geojson, final_waterway_source, point_components = compute_flood_risk(
             rainfall_mm=final_rainfall,
             dem_da=dem_da,
             landcover_da=landcover_da,
@@ -309,22 +313,17 @@ def evaluate_risk(
     timing["modelo_s"] = round(time.time() - t0, 1)
     timing["total_s"] = round(time.time() - t_total, 1)
 
-    # Extraer la celda de máximo riesgo para llenar 'components'
-    features = grid_geojson.get("features", [])
-    components = {}
-    if features:
-        highest = max(features, key=lambda x: x['properties']['risk_score'])
-        props = highest['properties']
-        components = {
-            "rainfall_mm": final_rainfall,
-            "twi_max": props.get("twi_raw", 0),
-            "distance_to_channel_m": props.get("dist_m", 0),
-            "imperviousness_pct": props.get("imperv_pct", 0),
-            "region": region,
-            "waterway_source": final_waterway_source,
-            "rainfall_detail": rain_detail,
-            "max_risk_in_bbox": max_risk,
-        }
+    # Llenar 'components' con los valores del punto exacto evaluado
+    components = {
+        "rainfall_mm": final_rainfall,
+        "twi_max": point_components["twi_raw"],
+        "distance_to_channel_m": point_components["dist_m"],
+        "imperviousness_pct": point_components["imperv_pct"],
+        "region": region,
+        "waterway_source": final_waterway_source,
+        "rainfall_detail": rain_detail,
+        "max_risk_in_bbox": max_risk,
+    }
 
     return RiskResponse(
         lat=lat,

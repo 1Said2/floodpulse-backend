@@ -183,7 +183,7 @@ from shapely.geometry import LineString
 def compute_flood_risk(rainfall_mm: float, dem_da, landcover_da, waterways_gdf, bbox: list, crs_metric: str, fallback_coords: list = None, lat: float = None, lon: float = None) -> tuple:
     """
     Motor matemático que combina todo.
-    Devuelve: (max_risk, point_risk, grid_geojson_dict, waterway_source)
+    Devuelve: (max_risk, point_risk, grid_geojson_dict, waterway_source, point_components)
     """
     # 1. Crear grilla
     grid_gdf = create_grid(bbox, crs_metric=crs_metric, resolution_m=100)
@@ -281,16 +281,25 @@ def compute_flood_risk(rainfall_mm: float, dem_da, landcover_da, waterways_gdf, 
     
     from shapely.geometry import Point
     point_risk = max_risk
+    point_row = grid_gdf.loc[grid_gdf["risk_score"].idxmax()]
     if lat is not None and lon is not None:
         p = Point(lon, lat)
         contains_idx = grid_gdf.geometry.contains(p)
         if contains_idx.any():
-            point_risk = float(grid_gdf.loc[contains_idx, "risk_score"].iloc[0])
+            point_row = grid_gdf.loc[contains_idx].iloc[0]
+            point_risk = float(point_row["risk_score"])
         else:
             distances = grid_gdf.geometry.centroid.distance(p)
-            point_risk = float(grid_gdf.loc[distances.idxmin(), "risk_score"])
+            point_row = grid_gdf.loc[distances.idxmin()]
+            point_risk = float(point_row["risk_score"])
+            
+    point_components = {
+        "twi_raw": float(point_row["twi_raw"]),
+        "dist_m": float(point_row["dist_m"]),
+        "imperv_pct": float(point_row["imperv_pct"])
+    }
     
     # Convertir a GeoJSON dictionary
     grid_geojson = json.loads(grid_gdf.to_json())
     
-    return max_risk, point_risk, grid_geojson, waterway_source
+    return max_risk, point_risk, grid_geojson, waterway_source, point_components

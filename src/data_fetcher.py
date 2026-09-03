@@ -62,7 +62,61 @@ def fetch_rainfall_forecast(lat: float, lon: float, hours_ahead: int = 24) -> fl
             if hours_counted >= hours_ahead:
                 break
                 
+                
     return total_forecast
+
+def fetch_live_rainfall(lat: float, lon: float, past_days: int = 2, hours_ahead: int = 24) -> tuple[float, float]:
+    """
+    Obtiene la precipitación pasada y el pronóstico en una sola llamada usando el endpoint forecast.
+    Ideal para modo en vivo, evitando el endpoint archive (que tiene 5 días de retraso).
+    Retorna (rain_observed, rain_forecast).
+    """
+    url = "https://api.open-meteo.com/v1/forecast"
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "hourly": "precipitation",
+        "past_days": past_days,
+        "forecast_days": 2,
+        "timezone": "UTC"
+    }
+    
+    try:
+        resp = requests.get(url, params=params, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        _clear_error("open-meteo-live")
+    except (requests.exceptions.RequestException, ValueError) as e:
+        _set_error("open-meteo-live", f"Error Open-Meteo Live: {resp.text[:200] if 'resp' in locals() and hasattr(resp, 'text') else str(e)}")
+        return 0.0, 0.0
+    
+    import datetime
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    
+    times = data["hourly"]["time"]
+    precips = data["hourly"]["precipitation"]
+    
+    past_rainfall = 0.0
+    forecast_rainfall = 0.0
+    hours_forecast_counted = 0
+    
+    for t_str, p in zip(times, precips):
+        if p is None:
+            continue
+        t_dt = datetime.datetime.fromisoformat(t_str + "+00:00")
+        if t_dt <= now_utc:
+            # Lluvia pasada en la ventana solicitada (past_days)
+            # Para evitar sumar demasiados días si past_days es alto, sumamos todos los que caen aquí.
+            # Open-Meteo devuelve exactamente desde past_days a las 00:00 hasta forecast_days.
+            past_rainfall += p
+        else:
+            # Lluvia futura
+            if hours_forecast_counted < hours_ahead:
+                forecast_rainfall += p
+                hours_forecast_counted += 1
+                
+    return past_rainfall, forecast_rainfall
+
 def fetch_rainfall_archive(lat: float, lon: float, start_date: str, end_date: str) -> float:
     """
     Obtiene precipitación histórica desde el modelo de reanálisis de Open-Meteo.
