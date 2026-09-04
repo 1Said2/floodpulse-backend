@@ -34,13 +34,11 @@ Parámetros: `lat`, `lon`, `event_window_start`, `event_window_end`,
 `ground_truth_flooded` (bool), `bbox_offset_deg`.
 
 ## Cómo funciona la lluvia (arquitectura híbrida, actualizada)
-El sistema combina dos fuentes automáticas, no una sola:
-- **NASA GPM IMERG / CHIRPS** (satélite, vía Google Earth Engine): lluvia ya caída e histórica.
-- **Open-Meteo**: pronóstico futuro (para anticipar antes de que la
-  inundación sea visible) y como respaldo histórico cuando el satélite no
-  detecta nada (nubes "cálidas" que el satélite no ve bien).
-El sistema toma el MÁXIMO entre ambas fuentes calibradas — si quieres
-evitar depender de esto durante pruebas locales, usa el parámetro
+El sistema se adapta según el modo de operación:
+- **Modo en vivo:** Utiliza exclusivamente **Open-Meteo** (endpoint de forecast) para obtener la precipitación observada de las últimas 24 horas y el pronóstico futuro en una sola llamada rápida, evitando retardos de reanálisis y fuentes satelitales deprecadas.
+- **Modo histórico:** Reactiva la suite satelital completa (**NASA GPM IMERG** y **CHIRPS**, vía Google Earth Engine) junto con **Open-Meteo Archive**, tomando el máximo de todas para mitigar fallas en la detección de nubes "cálidas".
+
+Para evitar depender de fuentes externas durante pruebas locales, usa el parámetro
 `rainfall_mm` para forzar un valor manual (ver siguiente sección).
 
 ¿Y necesito configurar Google Earth Engine?
@@ -70,5 +68,5 @@ La evaluación de susceptibilidad topográfica (`point_risk`) ha validado la cap
 ## Pendiente (HackTech El Niño 2026)
 - [x] Corregir `sys.excepthook` para el modelo WhiteboxTools en Windows.
 - [x] Reemplazar usos de funciones obsoletas como `.unary_union`.
-- [ ] Integrar el umbral óptimo en los repositorios Frontend y Alerts (`alert_threshold`).
-- [ ] Definir el sector final para la demo del sábado (sugerido: Ajaví o Monte Sinaí).
+- [x] Integrar el umbral óptimo en los repositorios Frontend y Alerts (`alert_threshold`).
+- [x] Definir el sector final para la demo del sábado (sugerido: Guayaquil Centro / Ajaví).
